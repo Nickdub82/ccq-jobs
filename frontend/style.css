@@ -1,0 +1,561 @@
+/* =========================================================
+   CCQ Jobs Portal — stylesheet
+   Aesthetic: industrial / utilitarian / Quebec construction
+   Palette: deep navy + hazard yellow + concrete grey
+   Typography: editorial serif headlines, mono for data
+   ========================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+    --navy:        #0f1724;
+    --navy-soft:   #1a2332;
+    --navy-line:   #2a3344;
+    --concrete:    #e8e6e1;
+    --concrete-2:  #d4d1c9;
+    --hazard:      #f4c430;
+    --hazard-deep: #c89f1f;
+    --ink:         #101418;
+    --muted:       #6b7280;
+    --rust:        #b04a2e;
+    --success:     #3a7d3e;
+
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-body:    'Inter', system-ui, sans-serif;
+    --font-mono:    'JetBrains Mono', 'SF Mono', Menlo, monospace;
+
+    --shadow-hard: 4px 4px 0 var(--navy);
+    --radius: 2px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    font-family: var(--font-body);
+    background: var(--concrete);
+    color: var(--ink);
+    line-height: 1.5;
+    font-size: 16px;
+    min-height: 100vh;
+}
+
+a { color: var(--navy); text-decoration: underline; text-underline-offset: 3px; }
+a:hover { color: var(--rust); }
+
+/* ---------- Header ---------- */
+header.site-header {
+    background: var(--navy);
+    color: var(--concrete);
+    border-bottom: 4px solid var(--hazard);
+    padding: 20px 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.brand {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+}
+
+.brand-mark {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    background: var(--hazard);
+    color: var(--navy);
+    padding: 4px 8px;
+    border-radius: var(--radius);
+}
+
+.brand-title {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: 28px;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+
+.brand-sub {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--concrete-2);
+    opacity: 0.75;
+}
+
+nav.site-nav {
+    display: flex;
+    gap: 24px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+nav.site-nav a {
+    color: var(--concrete);
+    text-decoration: none;
+    padding-bottom: 2px;
+    border-bottom: 2px solid transparent;
+    transition: border-color 0.15s ease;
+}
+
+nav.site-nav a:hover,
+nav.site-nav a.active {
+    border-bottom-color: var(--hazard);
+    color: var(--hazard);
+}
+
+/* ---------- Disclaimer banner ---------- */
+.disclaimer {
+    background: var(--hazard);
+    color: var(--navy);
+    padding: 10px 32px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: center;
+    border-bottom: 2px solid var(--navy);
+}
+
+.disclaimer strong { font-weight: 700; }
+
+/* ---------- Main layout ---------- */
+main.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 40px 32px 80px;
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 40px;
+}
+
+@media (max-width: 900px) {
+    main.container { grid-template-columns: 1fr; padding: 24px 16px; }
+}
+
+/* ---------- Sidebar filters ---------- */
+aside.filters {
+    background: white;
+    border: 2px solid var(--navy);
+    padding: 24px;
+    height: fit-content;
+    position: sticky;
+    top: 24px;
+    box-shadow: var(--shadow-hard);
+}
+
+.filters h2 {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--navy);
+    margin-bottom: 18px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--navy);
+}
+
+.filter-group { margin-bottom: 20px; }
+
+.filter-group label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+}
+
+.filter-group select,
+.filter-group input[type="text"] {
+    width: 100%;
+    font-family: var(--font-body);
+    font-size: 14px;
+    padding: 10px 12px;
+    border: 1.5px solid var(--navy-line);
+    background: var(--concrete);
+    border-radius: var(--radius);
+    transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.filter-group select:focus,
+.filter-group input:focus {
+    outline: none;
+    border-color: var(--hazard-deep);
+    background: white;
+}
+
+.checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+}
+
+.checkbox-group input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--hazard-deep);
+}
+
+.btn {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 12px 18px;
+    border: 2px solid var(--navy);
+    background: var(--hazard);
+    color: var(--navy);
+    cursor: pointer;
+    text-decoration: none;
+    transition: transform 0.08s ease, box-shadow 0.08s ease;
+    box-shadow: 3px 3px 0 var(--navy);
+}
+
+.btn:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 var(--navy);
+}
+
+.btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--navy);
+}
+
+.btn-secondary {
+    background: white;
+    color: var(--navy);
+}
+
+.btn-danger {
+    background: var(--rust);
+    color: white;
+}
+
+.btn-full { display: block; width: 100%; text-align: center; }
+
+/* ---------- Results column ---------- */
+section.results {
+    min-width: 0;
+}
+
+.results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 24px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--navy);
+}
+
+.results-header h1 {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: 42px;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    color: var(--navy);
+}
+
+.results-count {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.results-count strong {
+    color: var(--navy);
+    font-weight: 700;
+}
+
+/* ---------- Job cards ---------- */
+.job-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.job-card {
+    background: white;
+    border: 2px solid var(--navy);
+    padding: 24px;
+    position: relative;
+    transition: transform 0.08s ease, box-shadow 0.08s ease;
+    cursor: pointer;
+}
+
+.job-card:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--navy);
+}
+
+.job-card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 10px;
+}
+
+.job-title {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+    color: var(--navy);
+    flex: 1;
+}
+
+.job-ccq-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    background: var(--hazard);
+    color: var(--navy);
+    padding: 4px 8px;
+    border: 1.5px solid var(--navy);
+    white-space: nowrap;
+}
+
+.job-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 14px;
+}
+
+.job-meta .label {
+    color: var(--navy);
+    font-weight: 500;
+}
+
+.job-meta span::before {
+    content: "●";
+    margin-right: 8px;
+    color: var(--hazard-deep);
+}
+
+.job-meta span:first-child::before { content: none; }
+
+.job-employer {
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--navy);
+    margin-bottom: 12px;
+}
+
+.job-description {
+    font-size: 14px;
+    color: #333;
+    line-height: 1.5;
+    margin-bottom: 16px;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.job-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 14px;
+    border-top: 1.5px dashed var(--navy-line);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.job-source {
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.job-source strong { color: var(--navy); }
+
+.job-apply {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--navy);
+    text-decoration: none;
+    border-bottom: 2px solid var(--hazard);
+    padding-bottom: 2px;
+}
+
+.job-apply:hover { color: var(--rust); border-bottom-color: var(--rust); }
+
+/* ---------- Empty / loading states ---------- */
+.empty-state, .loading-state {
+    text-align: center;
+    padding: 80px 20px;
+    font-family: var(--font-mono);
+    color: var(--muted);
+}
+
+.empty-state h3 {
+    font-family: var(--font-display);
+    font-size: 28px;
+    color: var(--navy);
+    margin-bottom: 12px;
+}
+
+.loading-state::after {
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--navy-line);
+    border-top-color: var(--hazard);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    margin-left: 16px;
+    vertical-align: middle;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Pagination ---------- */
+.pagination {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 40px;
+}
+
+/* ---------- Map page ---------- */
+.map-container {
+    height: calc(100vh - 200px);
+    min-height: 500px;
+    border: 2px solid var(--navy);
+    box-shadow: var(--shadow-hard);
+}
+
+/* ---------- Admin page ---------- */
+.admin-card {
+    background: white;
+    border: 2px solid var(--navy);
+    padding: 24px;
+    margin-bottom: 16px;
+    box-shadow: 3px 3px 0 var(--navy);
+}
+
+.admin-card.review {
+    border-left: 6px solid var(--hazard-deep);
+}
+
+.admin-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.admin-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+}
+
+.stat-box {
+    background: var(--navy);
+    color: var(--concrete);
+    padding: 20px;
+    border: 2px solid var(--navy);
+}
+
+.stat-box.highlight {
+    background: var(--hazard);
+    color: var(--navy);
+}
+
+.stat-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    opacity: 0.8;
+    margin-bottom: 6px;
+}
+
+.stat-value {
+    font-family: var(--font-display);
+    font-size: 36px;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.ai-notes {
+    background: var(--concrete);
+    border-left: 3px solid var(--hazard-deep);
+    padding: 10px 14px;
+    margin-top: 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.confidence-bar {
+    height: 6px;
+    background: var(--concrete-2);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.confidence-bar > span {
+    display: block;
+    height: 100%;
+    background: var(--hazard);
+    transition: width 0.3s ease;
+}
+
+/* ---------- Footer ---------- */
+footer.site-footer {
+    background: var(--navy);
+    color: var(--concrete);
+    padding: 40px 32px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    text-align: center;
+    border-top: 4px solid var(--hazard);
+}
+
+footer.site-footer a { color: var(--hazard); }
+
+/* ---------- Admin login modal ---------- */
+.login-box {
+    max-width: 420px;
+    margin: 80px auto;
+    background: white;
+    padding: 40px;
+    border: 2px solid var(--navy);
+    box-shadow: var(--shadow-hard);
+}
+
+.login-box h2 {
+    font-family: var(--font-display);
+    font-size: 28px;
+    margin-bottom: 20px;
+    color: var(--navy);
+}

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Carte — Offres Peintre CCQ</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        main.container.map-page { grid-template-columns: 1fr; }
+        .leaflet-container { font-family: var(--font-body); }
+        .map-popup {
+            font-family: var(--font-body);
+            max-width: 280px;
+        }
+        .map-popup h4 {
+            font-family: var(--font-display);
+            font-size: 16px;
+            margin-bottom: 6px;
+            color: var(--navy);
+        }
+        .map-popup .employer {
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+        .map-popup .meta {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--muted);
+            margin-bottom: 8px;
+        }
+        .map-popup a {
+            display: inline-block;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-top: 4px;
+            border-bottom: 2px solid var(--hazard);
+        }
+    </style>
+</head>
+<body>
+
+<header class="site-header">
+    <div class="brand">
+        <span class="brand-mark">R-20</span>
+        <div>
+            <div class="brand-title">Chantier Jobs</div>
+            <div class="brand-sub">Veille d'offres · Peintres CCQ · Montréal</div>
+        </div>
+    </div>
+    <nav class="site-nav">
+        <a href="index.html">Offres</a>
+        <a href="map.html" class="active">Carte</a>
+        <a href="admin.html">Admin</a>
+    </nav>
+</header>
+
+<div class="disclaimer">
+    <strong>Avis :</strong> Seules les offres avec une adresse identifiable apparaissent sur la carte. Les positions peuvent être approximatives.
+</div>
+
+<main class="container map-page">
+    <div class="results-header">
+        <h1>Carte des chantiers</h1>
+        <div class="results-count"><strong id="pin-count">—</strong> emplacement(s)</div>
+    </div>
+    <div id="map" class="map-container"></div>
+</main>
+
+<footer class="site-footer">
+    <p>CCQ Jobs Portal · Veille d'offres publiques · Non affilié à la CCQ</p>
+</footer>
+
+<script src="config.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="map.js"></script>
+
+</body>
+</html>

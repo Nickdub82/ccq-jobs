@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin — File de révision</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+    <div class="brand">
+        <span class="brand-mark">R-20</span>
+        <div>
+            <div class="brand-title">Chantier Jobs</div>
+            <div class="brand-sub">Console administrateur</div>
+        </div>
+    </div>
+    <nav class="site-nav">
+        <a href="index.html">Offres</a>
+        <a href="map.html">Carte</a>
+        <a href="admin.html" class="active">Admin</a>
+    </nav>
+</header>
+
+<!-- Login gate -->
+<div id="login-view" class="login-box">
+    <h2>Connexion Admin</h2>
+    <p style="font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-bottom: 20px;">
+        Entrez le mot de passe admin (configuré dans ADMIN_PASSWORD).
+    </p>
+    <div class="filter-group">
+        <label for="admin-password">Mot de passe</label>
+        <input type="password" id="admin-password" autocomplete="current-password">
+    </div>
+    <button class="btn btn-full" id="btn-login">Se connecter</button>
+    <div id="login-error" style="color: var(--rust); margin-top: 12px; font-family: var(--font-mono); font-size: 12px;"></div>
+</div>
+
+<!-- Admin dashboard -->
+<main class="container" id="admin-view" style="display: none; grid-template-columns: 1fr;">
+
+    <div class="results-header">
+        <h1>Console administrateur</h1>
+        <button class="btn btn-secondary" id="btn-logout" style="padding: 8px 14px;">Déconnexion</button>
+    </div>
+
+    <section style="margin-bottom: 40px;">
+        <h2 style="font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--navy); margin-bottom: 16px;">
+            Statistiques
+        </h2>
+        <div class="admin-stats" id="stats-container">
+            <div class="loading-state">Chargement…</div>
+        </div>
+    </section>
+
+    <section style="margin-bottom: 40px;">
+        <h2 style="font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--navy); margin-bottom: 16px;">
+            File de révision — Offres signalées par Claude
+        </h2>
+        <div id="review-list">
+            <div class="loading-state">Chargement…</div>
+        </div>
+    </section>
+
+    <section>
+        <h2 style="font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--navy); margin-bottom: 16px;">
+            Derniers runs de scraping
+        </h2>
+        <div id="runs-list">
+            <div class="loading-state">Chargement…</div>
+        </div>
+    </section>
+
+</main>
+
+<footer class="site-footer">
+    <p>CCQ Jobs Portal · Console admin</p>
+</footer>
+
+<script src="config.js"></script>
+<script src="admin.js"></script>
+
+</body>
+</html>

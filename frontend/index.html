@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offres Peintre CCQ — Montréal</title>
+    <meta name="description" content="Portail d'agrégation d'offres d'emploi publiques pour peintres CCQ au Québec.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+    <div class="brand">
+        <span class="brand-mark">R-20</span>
+        <div>
+            <div class="brand-title">Chantier Jobs</div>
+            <div class="brand-sub">Veille d'offres · Peintres CCQ · Montréal</div>
+        </div>
+    </div>
+    <nav class="site-nav">
+        <a href="index.html" class="active">Offres</a>
+        <a href="map.html">Carte</a>
+        <a href="admin.html">Admin</a>
+    </nav>
+</header>
+
+<div class="disclaimer">
+    <strong>Avis :</strong> Ce portail agrège des offres d'emploi <strong>publiques</strong>. Non affilié à la CCQ. Postulez toujours via les canaux officiels de l'employeur.
+</div>
+
+<main class="container">
+
+    <aside class="filters">
+        <h2>Filtres</h2>
+
+        <div class="filter-group">
+            <label for="f-search">Recherche</label>
+            <input type="text" id="f-search" placeholder="Peintre résidentiel..." autocomplete="off">
+        </div>
+
+        <div class="filter-group">
+            <label for="f-region">Région</label>
+            <select id="f-region">
+                <option value="">Toutes les régions</option>
+                <option value="Montréal">Montréal</option>
+                <option value="Laval">Laval</option>
+                <option value="Montérégie">Montérégie</option>
+                <option value="Québec">Québec</option>
+            </select>
+        </div>
+
+        <div class="filter-group">
+            <label for="f-trade">Métier</label>
+            <select id="f-trade">
+                <option value="">Tous les métiers</option>
+                <option value="peintre">Peintre</option>
+                <option value="painter">Painter</option>
+                <option value="apprenti">Apprenti-peintre</option>
+            </select>
+        </div>
+
+        <div class="filter-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="f-ccq-only" checked>
+                <span>CCQ confirmé uniquement</span>
+            </label>
+        </div>
+
+        <button class="btn btn-full" id="btn-apply">Appliquer</button>
+        <button class="btn btn-secondary btn-full" id="btn-reset" style="margin-top: 10px;">Réinitialiser</button>
+    </aside>
+
+    <section class="results">
+        <div class="results-header">
+            <h1>Offres disponibles</h1>
+            <div class="results-count"><strong id="count">—</strong> offre(s)</div>
+        </div>
+
+        <div id="job-list" class="job-list">
+            <div class="loading-state">Chargement des offres…</div>
+        </div>
+
+        <div class="pagination" id="pagination" style="display:none;">
+            <button class="btn btn-secondary" id="prev-page">← Précédent</button>
+            <button class="btn btn-secondary" id="next-page">Suivant →</button>
+        </div>
+    </section>
+
+</main>
+
+<footer class="site-footer">
+    <p>CCQ Jobs Portal · Veille d'offres publiques · Non affilié à la CCQ</p>
+    <p style="margin-top:8px;opacity:0.7;">Toutes les offres redirigent vers la source originale.</p>
+</footer>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
