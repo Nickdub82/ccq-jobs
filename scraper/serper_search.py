@@ -24,7 +24,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 SERPER_SCRAPE_ENDPOINT = "https://scrape.serper.dev"
-INDEED_BASE = "https://emplois.ca.indeed.com"
+INDEED_BASE = "https://ca.indeed.com"
 REQUEST_DELAY_SEC = 1.5
 
 
