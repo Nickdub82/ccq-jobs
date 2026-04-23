@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from config import settings
 from db import get_session
 from models import Job, Employer, Source, JobSource, ScrapingRun
-from dedup import fingerprint_job
+from dedup import make_fingerprint
 
 import gmail_reader
 import email_parser
@@ -116,7 +116,7 @@ def process_emails(run_id: int) -> dict:
                 logger.warning(f"Skipping job with missing title/url: {job}")
                 continue
 
-            fp = fingerprint_job(title, employer_name, location)
+            fp = make_fingerprint(employer_name, title, location)
 
             # Dedup check
             existing = db.query(Job).filter_by(fingerprint=fp).first()
