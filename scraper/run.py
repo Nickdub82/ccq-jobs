@@ -1,365 +1,256 @@
 """
-Main scraper runner. This is the entry point invoked by the Railway cron every 2h.
+Scraper pipeline orchestration — Gmail + Claude edition.
 
-Pipeline:
-    1. Start a scraping_run log entry
-    2. Scrape configured sources (via Serper.dev)
-    3. Compute fingerprint for each raw job, dedup against existing DB
-    4. For NEW jobs only, send to Claude for classification
-    5. Insert/update jobs in DB based on Claude's output (per-job try/except)
-    6. Remove jobs from DB that weren't seen this run (source removed them)
-    7. Finalize the scraping_run log with stats
-
-Run manually: python scraper/run.py
+Flow:
+    1. Fetch Indeed alert emails from Gmail (last 48h)
+    2. For each email, ask Claude to extract individual jobs as JSON
+    3. Dedup against DB (by URL or employer+title+location fingerprint)
+    4. Insert new jobs into DB (with CCQ preliminary assessment from Claude)
 """
 import logging
 import sys
 from datetime import datetime, timezone
-from typing import Optional
 
+from config import settings
 from db import get_session
 from models import Job, Employer, Source, JobSource, ScrapingRun
+from dedup import fingerprint_job
 
-# IMPORTANT: use serper_search, not indeed — direct Indeed scraping gets 403'd
-from serper_search import scrape_indeed, RawJobListing
-from dedup import make_fingerprint, normalize_employer_name
-from ai_filter import classify_batch, estimate_cost
+import gmail_reader
+import email_parser
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
 )
 logger = logging.getLogger("scraper.run")
 
 
-def get_or_create_source(db, name: str) -> Source:
-    src = db.query(Source).filter(Source.name == name).first()
-    if not src:
-        raise RuntimeError(f"Source '{name}' not found in DB. Run db/schema.sql first.")
+def get_or_create_source(db, source_name: str) -> Source:
+    src = db.query(Source).filter_by(name=source_name).first()
+    if src is None:
+        src = Source(
+            name=source_name,
+            display_name=source_name.title(),
+            base_url=f"https://ca.{source_name}.com",
+            is_active=True,
+        )
+        db.add(src)
+        db.commit()
+        db.refresh(src)
     return src
 
 
-def get_or_create_employer(db, name: str) -> Optional[Employer]:
+def get_or_create_employer(db, name: str):
     if not name:
         return None
-    normalized = normalize_employer_name(name)
-    if not normalized:
-        return None
-    emp = db.query(Employer).filter(Employer.normalized_name == normalized).first()
-    if not emp:
+    normalized = name.lower().strip()
+    emp = db.query(Employer).filter_by(normalized_name=normalized).first()
+    if emp is None:
         emp = Employer(name=name, normalized_name=normalized)
         db.add(emp)
-        db.flush()
+        db.commit()
+        db.refresh(emp)
     return emp
 
 
-def process_source(source_name: str, run_id: int) -> dict:
-    """Scrape one source, run AI classification, upsert into DB, prune removed."""
-    stats = {
+def process_emails(run_id: int) -> dict:
+    """Fetch emails, extract jobs via Claude, write to DB."""
+    logger.info("Fetching Indeed alert emails from Gmail...")
+
+    try:
+        emails = gmail_reader.fetch_indeed_emails(hours_back=48)
+    except Exception as e:
+        logger.error(f"Gmail fetch failed: {e}", exc_info=True)
+        return {"jobs_scraped": 0, "jobs_new": 0, "error": str(e)}
+
+    if not emails:
+        logger.info("No Indeed emails found.")
+        return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
+
+    # Step 1: Ask Claude to extract jobs from each email
+    all_extracted = []
+    ai_calls = 0
+    for email in emails:
+        try:
+            jobs = email_parser.extract_jobs_from_email(email)
+            ai_calls += 1
+            for job in jobs:
+                # Attach source info from the email sender
+                job["_email_sender"] = email.sender
+                job["_email_id"] = email.message_id
+                all_extracted.append(job)
+        except Exception as e:
+            logger.error(f"Failed to extract from email {email.message_id}: {e}", exc_info=True)
+            continue
+
+    logger.info(f"Total jobs extracted by Claude: {len(all_extracted)}")
+
+    if not all_extracted:
+        return {
+            "jobs_scraped": 0,
+            "jobs_new": 0,
+            "ai_calls": ai_calls,
+        }
+
+    # Step 2: Dedup + insert into DB
+    db = get_session()
+    inserted = 0
+    updated = 0
+    flagged = 0
+    ccq_count = 0
+
+    try:
+        # Determine source from sender (indeed/jobillico/jobboom)
+        src_indeed = get_or_create_source(db, "indeed")
+
+        for job in all_extracted:
+            title = job.get("title")
+            employer_name = job.get("employer")
+            location = job.get("location")
+            original_url = job.get("original_url")
+
+            if not title or not original_url:
+                logger.warning(f"Skipping job with missing title/url: {job}")
+                continue
+
+            fp = fingerprint_job(title, employer_name, location)
+
+            # Dedup check
+            existing = db.query(Job).filter_by(fingerprint=fp).first()
+            if existing:
+                existing.last_seen_at = datetime.now(timezone.utc)
+                db.commit()
+                updated += 1
+                continue
+
+            # Determine source
+            sender_low = (job.get("_email_sender") or "").lower()
+            if "indeed" in sender_low:
+                src = src_indeed
+            else:
+                src = src_indeed  # default for now; expand when we add Jobillico/Jobboom
+
+            employer = get_or_create_employer(db, employer_name)
+
+            # CCQ preliminary assessment
+            is_likely_ccq = bool(job.get("is_likely_ccq", False))
+            ccq_confidence = float(job.get("ccq_confidence", 0) or 0)
+
+            # Auto-approve if CCQ with high confidence, else flag for review
+            is_approved = is_likely_ccq and ccq_confidence >= 0.75
+            needs_review = not is_approved
+
+            new_job = Job(
+                fingerprint=fp,
+                external_id=None,  # we could extract from URL if needed
+                title=title,
+                description=job.get("description"),
+                employer_id=employer.id if employer else None,
+                location_text=location,
+                city=None,
+                region=None,
+                address=None,
+                job_type=None,
+                trade="peintre",  # we only subscribe to painter alerts
+                salary_text=job.get("salary_text"),
+                is_ccq=is_likely_ccq,
+                original_url=original_url,
+                source_id=src.id,
+                ai_confidence=ccq_confidence,
+                ai_notes=job.get("notes"),
+                is_approved=is_approved,
+                needs_review=needs_review,
+            )
+            db.add(new_job)
+            db.commit()
+            db.refresh(new_job)
+
+            js = JobSource(
+                job_id=new_job.id,
+                source_id=src.id,
+                source_url=original_url,
+            )
+            db.add(js)
+            db.commit()
+
+            inserted += 1
+            if needs_review:
+                flagged += 1
+            if is_likely_ccq:
+                ccq_count += 1
+
+    finally:
+        db.close()
+
+    return {
+        "jobs_scraped": len(all_extracted),
+        "jobs_new": inserted,
+        "jobs_updated": updated,
+        "jobs_removed": 0,
+        "jobs_flagged": flagged,
+        "ai_calls": ai_calls,
+        "ccq_identified": ccq_count,
+    }
+
+
+def main():
+    logger.info("=" * 60)
+    logger.info("Scraper starting up (Gmail + Claude edition)")
+    logger.info("=" * 60)
+
+    # Smoke-test DB connection
+    try:
+        db = get_session()
+        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db.close()
+        logger.info("DB connection OK")
+    except Exception as e:
+        logger.error(f"DB connection failed: {e}", exc_info=True)
+        sys.exit(1)
+
+    db = get_session()
+    run = ScrapingRun(status="running", started_at=datetime.now(timezone.utc))
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    run_id = run.id
+    db.close()
+
+    final_stats = {
         "jobs_scraped": 0,
         "jobs_new": 0,
         "jobs_updated": 0,
         "jobs_removed": 0,
         "jobs_flagged": 0,
         "ai_calls": 0,
-        "ai_cost": 0.0,
     }
 
-    db = get_session()
     try:
-        source = get_or_create_source(db, source_name)
-
-        # --- 1. SCRAPE ---
-        # scrape_indeed() is now a Serper-backed alias that returns results
-        # from Indeed, Jobboom, Jobillico, Guichet-Emplois, etc.
-        logger.info(f"Scraping via Serper for source group '{source_name}'...")
-        if source_name == "indeed":
-            raw_jobs = scrape_indeed()
-        else:
-            raw_jobs = []
-            logger.warning(f"No scraper module for {source_name}, skipping.")
-
-        stats["jobs_scraped"] = len(raw_jobs)
-        if not raw_jobs:
-            logger.info(f"No jobs scraped from {source_name}.")
-            return stats
-
-        # --- 2. DEDUP against existing DB ---
-        raw_with_fp = []
-        for rj in raw_jobs:
-            fp = make_fingerprint(rj.employer_name or "", rj.title, rj.location_text or "")
-            raw_with_fp.append((fp, rj))
-
-        fingerprints_this_run = {fp for fp, _ in raw_with_fp}
-        existing_jobs = (
-            db.query(Job)
-            .filter(Job.fingerprint.in_(list(fingerprints_this_run)))
-            .all()
-        )
-        existing_by_fp = {j.fingerprint: j for j in existing_jobs}
-
-        new_items = [(fp, rj) for fp, rj in raw_with_fp if fp not in existing_by_fp]
-        seen_items = [(fp, rj) for fp, rj in raw_with_fp if fp in existing_by_fp]
-
-        logger.info(f"{len(new_items)} new jobs, {len(seen_items)} already known.")
-
-        # --- 3. UPDATE last_seen_at for jobs we saw again ---
-        now = datetime.now(timezone.utc)
-        for fp, rj in seen_items:
-            job = existing_by_fp[fp]
-            job.last_seen_at = now
-            js = next((s for s in job.job_sources if s.source_id == source.id), None)
-            if js:
-                js.last_seen_at = now
-            else:
-                try:
-                    db.add(JobSource(
-                        job_id=job.id, source_id=source.id,
-                        source_url=rj.original_url[:1000],
-                    ))
-                    db.flush()
-                except Exception as e:
-                    logger.warning(f"Could not add JobSource for existing job {job.id}: {e}")
-                    db.rollback()
-        stats["jobs_updated"] = len(seen_items)
-        db.commit()
-
-        # --- 4. CLAUDE CLASSIFICATION on new items only ---
-        if new_items:
-            raw_dicts = [rj.to_dict() for _, rj in new_items]
-
-            BATCH_SIZE = 10
-            classified_all = []
-            for i in range(0, len(raw_dicts), BATCH_SIZE):
-                batch = raw_dicts[i : i + BATCH_SIZE]
-                try:
-                    classified = classify_batch(batch)
-                    for c in classified:
-                        c["index"] = c["index"] + i
-                    classified_all.extend(classified)
-                    stats["ai_calls"] += 1
-                except Exception as e:
-                    logger.exception(f"Claude call failed for batch {i}: {e}")
-                    continue
-
-            # --- 5. INSERT new jobs into DB ---
-            # Track fingerprints seen in THIS run to avoid duplicate-key errors
-            seen_fingerprints_this_run: set[str] = set()
-
-            for c in classified_all:
-                idx = c.get("index", -1)
-                if idx < 0 or idx >= len(new_items):
-                    continue
-
-                fp, rj = new_items[idx]
-
-                # ----- Keyword pre-check: domain expertise can rescue Claude's mistakes -----
-                # Run this BEFORE the is_relevant skip, so jobs with strong CCQ
-                # keywords are kept even if Claude wrongly marked them irrelevant.
-                all_text = " ".join(filter(None, [
-                    (c.get("title") or rj.title or ""),
-                    (c.get("description_clean") or rj.description_snippet or ""),
-                ])).lower()
-
-                strong_ccq_keywords = [
-                    "ccq",
-                    "carte ccq",
-                    "carte valide",
-                    "cartes obligatoires",
-                    "carte obligatoire",
-                    "carte de compétence",
-                    "carte de competence",
-                    "compétence ccq",
-                    "competence ccq",
-                    "convention ccq",
-                    "convention collective ccq",
-                    "r-20",
-                    "r20",
-                    "commercial",
-                    "industriel",
-                    "industrial",
-                    "apprenti",
-                    "compagnon",
-                ]
-                has_strong_signal = any(k in all_text for k in strong_ccq_keywords)
-
-                # Skip irrelevant jobs UNLESS our domain keywords say otherwise
-                claude_said_relevant = c.get("is_relevant", False)
-                if not claude_said_relevant and not has_strong_signal:
-                    continue
-
-                # Skip intra-run duplicates
-                if fp in seen_fingerprints_this_run:
-                    logger.debug(f"Skipping intra-run duplicate: {rj.title}")
-                    continue
-
-                try:
-                    employer = get_or_create_employer(
-                        db, c.get("employer_name") or rj.employer_name
-                    )
-
-                    needs_review = c.get("needs_review", False)
-                    confidence = c.get("confidence", 0.0) or 0.0
-                    is_ccq_flag = bool(c.get("is_ccq", False))
-                    has_employer = bool(c.get("employer_name") or rj.employer_name)
-
-                    if has_strong_signal:
-                        # Domain rule: trust the CCQ signals, override & boost
-                        is_ccq_flag = True
-                        if confidence < 0.75:
-                            confidence = max(confidence, 0.75)
-                        if needs_review and confidence >= 0.70:
-                            needs_review = False
-                        # If Claude rejected it but keywords rescued it, send to review
-                        # (the employer/description might be weak, human eyes on)
-                        if not claude_said_relevant:
-                            needs_review = True
-
-                    # Auto-approve rules (relaxed since keyword boost is strong signal):
-                    #   - CCQ confirmed + employer known + decent confidence (>= 0.70)
-                    #   - OR very high confidence regardless (>= 0.85)
-                    # In both cases, Claude must NOT have flagged it for review.
-                    is_approved = (not needs_review) and (
-                        (is_ccq_flag and has_employer and confidence >= 0.70)
-                        or confidence >= 0.85
-                    )
-
-                    def _clip(val, n):
-                        if val is None:
-                            return None
-                        s = str(val)
-                        return s[:n] if len(s) > n else s
-
-                    job = Job(
-                        fingerprint=fp,
-                        external_id=_clip(rj.external_id, 200),
-                        title=_clip(c.get("title") or rj.title, 500),
-                        description=c.get("description_clean") or rj.description_snippet,
-                        employer_id=employer.id if employer else None,
-                        location_text=_clip(rj.location_text, 300),
-                        city=_clip(c.get("city"), 100),
-                        region=_clip(c.get("region"), 100),
-                        address=_clip(c.get("address"), 500),
-                        job_type=_clip(c.get("job_type"), 50),
-                        trade=_clip(c.get("trade"), 100),
-                        salary_text=_clip(c.get("salary_text") or rj.salary_text, 200),
-                        is_ccq=bool(c.get("is_ccq", False)),
-                        original_url=_clip(rj.original_url, 1000),
-                        source_id=source.id,
-                        posted_at=None,
-                        first_seen_at=now,
-                        last_seen_at=now,
-                        ai_confidence=confidence,
-                        ai_notes=c.get("notes"),
-                        is_approved=is_approved,
-                        needs_review=needs_review,
-                    )
-                    db.add(job)
-                    db.flush()
-
-                    db.add(JobSource(
-                        job_id=job.id,
-                        source_id=source.id,
-                        source_url=_clip(rj.original_url, 1000),
-                    ))
-                    db.flush()
-
-                    # Commit per-job so one bad row doesn't blow up the whole batch
-                    db.commit()
-
-                    seen_fingerprints_this_run.add(fp)
-                    stats["jobs_new"] += 1
-                    if needs_review:
-                        stats["jobs_flagged"] += 1
-
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to insert job {rj.title!r} "
-                        f"(employer={rj.employer_name!r}): {type(e).__name__}: {e}"
-                    )
-                    db.rollback()
-                    continue
-
-        # --- 6. REMOVE jobs from this source that we didn't see this run ---
-        stale = (
-            db.query(JobSource)
-            .filter(
-                JobSource.source_id == source.id,
-                JobSource.last_seen_at < now.replace(minute=0, second=0, microsecond=0),
-            )
-            .all()
-        )
-        removed_count = 0
-        for js in stale:
-            job = db.query(Job).filter(Job.id == js.job_id).first()
-            if job and len(job.job_sources) <= 1:
-                db.delete(job)
-                removed_count += 1
-            else:
-                db.delete(js)
-        stats["jobs_removed"] = removed_count
-        db.commit()
-
-        logger.info(f"Done with {source_name}. Stats: {stats}")
-        return stats
-
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-def main():
-    """Entry point — run all active sources."""
-    db = get_session()
-
-    run = ScrapingRun(status="running")
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    run_id = run.id
-
-    aggregate = {
-        "jobs_scraped": 0, "jobs_new": 0, "jobs_updated": 0,
-        "jobs_removed": 0, "jobs_flagged": 0, "ai_calls": 0,
-    }
-    error_msg = None
-
-    try:
-        active_sources = db.query(Source).filter(Source.is_active == True).all()
-        for src in active_sources:
-            try:
-                stats = process_source(src.name, run_id)
-                for k in aggregate:
-                    aggregate[k] += stats.get(k, 0)
-            except Exception as e:
-                logger.exception(f"Source {src.name} failed: {e}")
-                error_msg = (error_msg or "") + f"\n{src.name}: {e}"
+        stats = process_emails(run_id)
+        for k, v in stats.items():
+            if k in final_stats and isinstance(v, int):
+                final_stats[k] += v
     except Exception as e:
-        logger.exception(f"Run failed: {e}")
-        error_msg = str(e)
-    finally:
-        run = db.query(ScrapingRun).filter(ScrapingRun.id == run_id).first()
-        run.finished_at = datetime.now(timezone.utc)
-        run.status = "failed" if error_msg else "success"
-        run.jobs_scraped = aggregate["jobs_scraped"]
-        run.jobs_new = aggregate["jobs_new"]
-        run.jobs_updated = aggregate["jobs_updated"]
-        run.jobs_removed = aggregate["jobs_removed"]
-        run.jobs_flagged = aggregate["jobs_flagged"]
-        run.ai_calls = aggregate["ai_calls"]
-        run.error_message = error_msg
-        db.commit()
-        db.close()
+        logger.error(f"Run failed: {e}", exc_info=True)
 
-    logger.info(f"Run {run_id} complete. Final stats: {aggregate}")
-    return aggregate
+    db = get_session()
+    run = db.query(ScrapingRun).get(run_id)
+    run.finished_at = datetime.now(timezone.utc)
+    run.status = "success"
+    run.jobs_scraped = final_stats["jobs_scraped"]
+    run.jobs_new = final_stats["jobs_new"]
+    run.jobs_updated = final_stats["jobs_updated"]
+    run.jobs_removed = final_stats["jobs_removed"]
+    run.jobs_flagged = final_stats["jobs_flagged"]
+    run.ai_calls = final_stats["ai_calls"]
+    db.commit()
+    db.close()
+
+    logger.info(f"Run {run_id} complete. Final stats: {final_stats}")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.exception("Fatal error in scraper run.")
-        sys.exit(1)
+    main()
