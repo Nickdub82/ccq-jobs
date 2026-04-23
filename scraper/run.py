@@ -153,8 +153,39 @@ def process_source(source_name: str, run_id: int) -> dict:
 
                 fp, rj = new_items[idx]
 
-                # Skip irrelevant jobs entirely
-                if not c.get("is_relevant", False):
+                # ----- Keyword pre-check: domain expertise can rescue Claude's mistakes -----
+                # Run this BEFORE the is_relevant skip, so jobs with strong CCQ
+                # keywords are kept even if Claude wrongly marked them irrelevant.
+                all_text = " ".join(filter(None, [
+                    (c.get("title") or rj.title or ""),
+                    (c.get("description_clean") or rj.description_snippet or ""),
+                ])).lower()
+
+                strong_ccq_keywords = [
+                    "ccq",
+                    "carte ccq",
+                    "carte valide",
+                    "cartes obligatoires",
+                    "carte obligatoire",
+                    "carte de compétence",
+                    "carte de competence",
+                    "compétence ccq",
+                    "competence ccq",
+                    "convention ccq",
+                    "convention collective ccq",
+                    "r-20",
+                    "r20",
+                    "commercial",
+                    "industriel",
+                    "industrial",
+                    "apprenti",
+                    "compagnon",
+                ]
+                has_strong_signal = any(k in all_text for k in strong_ccq_keywords)
+
+                # Skip irrelevant jobs UNLESS our domain keywords say otherwise
+                claude_said_relevant = c.get("is_relevant", False)
+                if not claude_said_relevant and not has_strong_signal:
                     continue
 
                 # Skip intra-run duplicates
@@ -172,39 +203,6 @@ def process_source(source_name: str, run_id: int) -> dict:
                     is_ccq_flag = bool(c.get("is_ccq", False))
                     has_employer = bool(c.get("employer_name") or rj.employer_name)
 
-                    # ----- Keyword rules: focused on unambiguous CCQ signals -----
-                    # Rule of thumb (from domain expertise):
-                    # CCQ work is defined by the *contract nature*, not the building type.
-                    # A residential construction site CAN be CCQ, so we do NOT exclude
-                    # residential. Instead, we only boost when we see unambiguous signals.
-                    all_text = " ".join(filter(None, [
-                        (c.get("title") or rj.title or ""),
-                        (c.get("description_clean") or rj.description_snippet or ""),
-                    ])).lower()
-
-                    # Unambiguous CCQ signals — if ANY is present, trust it's CCQ.
-                    strong_ccq_keywords = [
-                        "ccq",
-                        "carte ccq",
-                        "carte valide",
-                        "cartes obligatoires",
-                        "carte obligatoire",
-                        "carte de compétence",
-                        "carte de competence",
-                        "compétence ccq",
-                        "competence ccq",
-                        "convention ccq",
-                        "convention collective ccq",
-                        "r-20",
-                        "r20",
-                        "commercial",
-                        "industriel",
-                        "industrial",
-                        "apprenti",
-                        "compagnon",
-                    ]
-                    has_strong_signal = any(k in all_text for k in strong_ccq_keywords)
-
                     if has_strong_signal:
                         # Domain rule: trust the CCQ signals, override & boost
                         is_ccq_flag = True
@@ -212,6 +210,10 @@ def process_source(source_name: str, run_id: int) -> dict:
                             confidence = max(confidence, 0.75)
                         if needs_review and confidence >= 0.70:
                             needs_review = False
+                        # If Claude rejected it but keywords rescued it, send to review
+                        # (the employer/description might be weak, human eyes on)
+                        if not claude_said_relevant:
+                            needs_review = True
 
                     # Auto-approve rules (relaxed since keyword boost is strong signal):
                     #   - CCQ confirmed + employer known + decent confidence (>= 0.70)
