@@ -3,8 +3,8 @@
    ========================================================== */
 
 window.CCQ_CONFIG = {
-    // Production: replace with your Railway URL, e.g. 'https://ccq-jobs-api.up.railway.app'
-    API_BASE: 'http://localhost:8000',
+    // Production: Railway backend URL
+    API_BASE: 'https://web-production-5c8a.up.railway.app',
 
     // Optional Google Maps API key (leave empty to use OpenStreetMap/Leaflet fallback)
     GOOGLE_MAPS_KEY: '',
