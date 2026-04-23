@@ -31,3 +31,6 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+scraper/credentials.json
+scraper/token.json
