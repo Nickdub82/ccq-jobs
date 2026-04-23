@@ -15,7 +15,10 @@ class ScraperSettings(BaseSettings):
     scraper_search_terms: str = "peintre CCQ,painter CCQ,peintre construction,carte CCQ peintre"
     scraper_max_pages: int = 2
 
-    # Google Custom Search API (new)
+    # Serper.dev search API (Google results via proxy)
+    serper_api_key: str = ""
+
+    # Legacy Google Custom Search (deprecated, kept for compat)
     google_api_key: str = ""
     google_search_engine_id: str = ""
 
