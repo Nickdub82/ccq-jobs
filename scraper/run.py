@@ -21,7 +21,7 @@ from typing import Optional
 from db import get_session
 from models import Job, Employer, Source, JobSource, ScrapingRun
 
-from indeed import scrape_indeed, RawJobListing
+from google_search import scrape_indeed, RawJobListing
 from dedup import make_fingerprint, normalize_employer_name
 from ai_filter import classify_batch, estimate_cost
 
