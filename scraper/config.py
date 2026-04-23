@@ -10,15 +10,15 @@ class ScraperSettings(BaseSettings):
     anthropic_api_key: str
     claude_model: str = "claude-sonnet-4-6"
 
-    # Scraper target
-    scraper_target_city: str = "Montreal"
-    scraper_search_terms: str = "peintre CCQ,painter CCQ,peintre construction,carte CCQ peintre"
+    # Scraper target — what a human would type in Indeed's search bar
+    scraper_target_city: str = "Montréal"
+    scraper_search_terms: str = "peintre ccq,peintre construction,painter ccq,peintre commercial,peintre compagnon"
     scraper_max_pages: int = 2
 
-    # Serper.dev search API (Google results via proxy)
+    # Serper.dev API
     serper_api_key: str = ""
 
-    # Legacy Google Custom Search (deprecated, kept for compat)
+    # Legacy (kept for compat, unused)
     google_api_key: str = ""
     google_search_engine_id: str = ""
 

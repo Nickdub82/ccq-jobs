@@ -1,27 +1,34 @@
 """
-Serper.dev Google Search scraper — uses the REAL /search endpoint.
+Indeed-direct scraper via Serper.dev's /scrape endpoint.
 
-Serper does NOT have a /jobs endpoint (that's SerpAPI, a different service).
-Instead, we craft Google queries that target individual job posting URLs on
-known job boards, and we aggressively filter out listing / aggregator pages
-in post-processing.
+Strategy:
+    1. Hit Indeed search URLs directly (peintre ccq, peintre construction, etc.)
+    2. Serper fetches the HTML with their residential IPs (bypasses Indeed's 403)
+    3. Parse the returned HTML to extract individual job listings
+    4. Return clean RawJobListing objects ready for Claude classification
 
-Together with the hardened Claude prompt (which also rejects listings), this
-gives us a clean pipeline without paying for SerpAPI.
+Why this is better than the /search approach:
+    - We use Indeed's native job search (already optimized for jobs)
+    - Results are 100% Indeed jobs, no mix of electricians/labourers
+    - No Google listing pages ("25+ offres...") to filter out
+    - Much higher signal-to-noise ratio
 """
 import time
 import logging
 from dataclasses import dataclass, asdict
 from typing import Optional
+from urllib.parse import quote_plus
 import httpx
+from bs4 import BeautifulSoup
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
-REQUEST_DELAY_SEC = 1.0
+SERPER_SCRAPE_ENDPOINT = "https://scrape.serper.dev"
+INDEED_BASE = "https://emplois.ca.indeed.com"
+REQUEST_DELAY_SEC = 1.5
 
 
 @dataclass
@@ -40,164 +47,151 @@ class RawJobListing:
         return asdict(self)
 
 
-def _source_from_url(url: str) -> str:
-    u = (url or "").lower()
-    if "jobboom" in u:
-        return "jobboom"
-    if "jobillico" in u:
-        return "jobillico"
-    if "indeed" in u:
-        return "indeed"
-    if "guichetemplois" in u or "jobbank" in u:
-        return "guichetemplois"
-    if "facebook" in u:
-        return "facebook"
-    if "linkedin" in u:
-        return "linkedin"
-    if "glassdoor" in u:
-        return "glassdoor"
-    return "indeed"  # sensible fallback
-
-
-# Patterns that mark a URL as a listing/aggregator page (not an individual job)
-_BAD_URL_PATTERNS = [
-    "/jobs?",            # indeed.com/jobs?q=... (search page)
-    "/jobs/q-",          # indeed variant
-    "/recherche",        # jobboom.com/recherche...
-    "/search?",
-    "?q=",
-    "&q=",
-    "/listings",
-    "/emploi-offres",    # jobillico generic listing
-    "/browse",
-    "/jobs-in-",         # linkedin/glassdoor browse pages
-]
-
-# URL patterns that indicate a real individual job posting
-_GOOD_URL_PATTERNS = [
-    "/viewjob",             # indeed individual job
-    "/rc/clk",              # indeed click tracker → individual
-    "/offre-emploi",        # jobboom/jobillico individual offer
-    "/fr/emplois/",         # jobboom individual
-    "/emploi/",             # jobillico individual
-    "/jobposting/",
-    "/jobsearch.jobview",   # guichet emplois individual
-]
-
-
-def _classify_url(url: str) -> str:
-    """Return 'individual', 'listing', or 'unknown'."""
-    if not url:
-        return "listing"
-    u = url.lower()
-    if any(p in u for p in _BAD_URL_PATTERNS):
-        return "listing"
-    if any(p in u for p in _GOOD_URL_PATTERNS):
-        return "individual"
-    return "unknown"
+def _build_indeed_urls(search_terms: list[str], city: str, radius_km: int = 60) -> list[str]:
+    """Build clean Indeed search URLs (no Cloudflare tokens, no vjk)."""
+    urls = []
+    encoded_location = quote_plus(f"{city}, QC")
+    for term in search_terms:
+        encoded_q = quote_plus(term)
+        url = (
+            f"{INDEED_BASE}/jobs"
+            f"?q={encoded_q}"
+            f"&l={encoded_location}"
+            f"&radius={radius_km}"
+            f"&sort=date"
+        )
+        urls.append(url)
+    return urls
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
-def _serper_search(client: httpx.Client, query: str, page: int = 1) -> dict:
+def _serper_scrape(client: httpx.Client, url: str) -> dict:
+    """Ask Serper to scrape a URL for us."""
     headers = {
         "X-API-KEY": settings.serper_api_key,
         "Content-Type": "application/json",
     }
     payload = {
-        "q": query,
-        "gl": "ca",
-        "hl": "fr",
-        "num": 10,
-        "page": page,
+        "url": url,
+        "includeMarkdown": False,
     }
-    resp = client.post(SERPER_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=30)
+    resp = client.post(SERPER_SCRAPE_ENDPOINT, json=payload, headers=headers, timeout=60)
     if resp.status_code == 429:
-        logger.warning("Serper rate limit hit — backing off")
+        logger.warning("Serper scrape rate limit hit — backing off")
         raise httpx.HTTPStatusError("rate limit", request=resp.request, response=resp)
     resp.raise_for_status()
     return resp.json()
 
 
-def _parse_search_item(item: dict) -> Optional[RawJobListing]:
-    """Convert a Serper organic result into a RawJobListing."""
-    url = item.get("link") or ""
-    if not url:
-        return None
+def _parse_indeed_html(html: str) -> list[RawJobListing]:
+    """Parse Indeed's search results HTML to extract individual jobs."""
+    if not html:
+        return []
 
-    # Reject listing pages upfront (before spending a Claude call on them)
-    classification = _classify_url(url)
-    if classification == "listing":
-        return None
+    soup = BeautifulSoup(html, "lxml")
+    jobs = []
 
-    title = (item.get("title") or "").strip()
-    if not title:
-        return None
-
-    # Reject titles that scream "listing page"
-    title_lower = title.lower()
-    bad_title_patterns = [
-        "25+ offres",
-        "100+ offres",
-        "500+ offres",
-        "900+ offres",
-        "1000+ offres",
-        "offres d'emploi |",
-        "consultez nos",
-        "jobs in montreal",
-        "painter jobs",
-        "peintre jobs",
-    ]
-    if any(p in title_lower for p in bad_title_patterns):
-        return None
-
-    snippet = (item.get("snippet") or "").strip()
-
-    # Pull richer metadata if Google returned it
-    rich = item.get("richSnippet") or {}
-    top = rich.get("top") or {}
-    detected = top.get("detectedExtensions") or {}
-
-    employer = detected.get("company") or None
-    location = detected.get("address") or detected.get("location") or None
-    posted = detected.get("postedat") or detected.get("postedtime") or None
-
-    return RawJobListing(
-        source_name=_source_from_url(url),
-        external_id=None,
-        title=title,
-        employer_name=employer,
-        location_text=location,
-        description_snippet=snippet,
-        salary_text=None,
-        posted_text=posted,
-        original_url=url,
+    cards = soup.select(
+        "div.job_seen_beacon, div.tapItem, li.css-1ac2h1w, "
+        "div[data-testid='mosaic-provider-jobcards'] li, "
+        "div.cardOutline, a.tapItem"
     )
+
+    if not cards:
+        cards = soup.select("[data-jk]")
+
+    for card in cards:
+        try:
+            jk = card.get("data-jk")
+            if not jk:
+                jk_el = card.select_one("[data-jk]")
+                if jk_el:
+                    jk = jk_el.get("data-jk")
+
+            title_el = card.select_one(
+                "h2.jobTitle span, h2.jobTitle a, a.jcs-JobTitle, "
+                "h2 a span[title], h2 span[title]"
+            )
+            title = None
+            if title_el:
+                title = title_el.get("title") or title_el.get_text(strip=True)
+            if not title:
+                title_el = card.select_one("h2")
+                if title_el:
+                    title = title_el.get_text(strip=True)
+
+            link_el = card.select_one("h2 a, a.jcs-JobTitle, a[data-jk]")
+            href = link_el.get("href") if link_el else None
+            if href and href.startswith("/"):
+                href = INDEED_BASE + href
+            if not href and jk:
+                href = f"https://ca.indeed.com/viewjob?jk={jk}"
+
+            employer_el = card.select_one(
+                "[data-testid='company-name'], span.companyName, "
+                ".companyName, [class*='companyName']"
+            )
+            employer = employer_el.get_text(strip=True) if employer_el else None
+
+            loc_el = card.select_one(
+                "[data-testid='text-location'], .companyLocation, "
+                "div.companyLocation, [class*='locationsContainer']"
+            )
+            location = loc_el.get_text(strip=True) if loc_el else None
+
+            snippet_el = card.select_one(
+                ".job-snippet, div[class*='snippet'], "
+                "[data-testid='jobsnippet_footer'], ul li"
+            )
+            snippet = snippet_el.get_text(strip=True, separator=" ") if snippet_el else None
+
+            salary_el = card.select_one(
+                "[data-testid='attribute_snippet_testid'], "
+                ".salary-snippet-container, .salaryOnly, "
+                "div[class*='salary']"
+            )
+            salary = salary_el.get_text(strip=True) if salary_el else None
+
+            posted_el = card.select_one(
+                ".date, span.date, [data-testid*='Date'], "
+                "[class*='myJobsStateDate']"
+            )
+            posted = posted_el.get_text(strip=True) if posted_el else None
+
+            if not title or not href:
+                continue
+
+            jobs.append(RawJobListing(
+                source_name="indeed",
+                external_id=jk,
+                title=title,
+                employer_name=employer,
+                location_text=location,
+                description_snippet=snippet,
+                salary_text=salary,
+                posted_text=posted,
+                original_url=href,
+            ))
+        except Exception as e:
+            logger.debug(f"Failed to parse a card: {e}")
+            continue
+
+    return jobs
 
 
 def search_jobs(
     search_terms: list[str] = None,
     city: str = None,
-    max_pages_per_query: int = 2,
+    radius_km: int = 60,
 ) -> list[RawJobListing]:
     """
-    Query Serper /search with Google queries targeted at individual job pages.
-
-    Uses `inurl:` and `site:` operators to nudge Google toward individual
-    job posting URLs instead of category listings.
+    Scrape Indeed search pages via Serper for each search term.
+    Returns deduplicated list of individual job postings.
     """
     search_terms = search_terms or settings.search_terms_list
     city = city or settings.scraper_target_city
 
-    queries = []
-    for term in search_terms:
-        # Generic query — let Google surface anything
-        queries.append(f"{term} {city}")
-        # Indeed individual job pages
-        queries.append(f'"{term}" {city} site:ca.indeed.com inurl:viewjob')
-        # Jobboom individual job pages
-        queries.append(f'"{term}" {city} site:jobboom.com inurl:offre-emploi')
-        # Jobillico individual job pages
-        queries.append(f'"{term}" {city} site:jobillico.com inurl:emploi')
+    urls = _build_indeed_urls(search_terms, city, radius_km=radius_km)
 
     all_jobs: dict[str, RawJobListing] = {}
 
@@ -206,41 +200,38 @@ def search_jobs(
         return []
 
     with httpx.Client() as client:
-        for query in queries:
-            logger.info(f"Serper search: {query!r}")
+        for url in urls:
+            logger.info(f"Scraping Indeed: {url}")
+            try:
+                data = _serper_scrape(client, url)
+            except Exception as e:
+                logger.error(f"Serper scrape failed for {url}: {e}")
+                continue
 
-            for page in range(1, max_pages_per_query + 1):
-                try:
-                    data = _serper_search(client, query, page=page)
-                except Exception as e:
-                    logger.error(f"Serper query failed for {query!r} page={page}: {e}")
-                    break
+            # Serper returns the scraped content in various fields
+            html = data.get("html") or data.get("content") or ""
 
-                items = data.get("organic") or []
-                if not items:
-                    logger.info(f"  No more results for {query!r} at page={page}")
-                    break
-
-                kept = 0
-                rejected = 0
-                for item in items:
-                    job = _parse_search_item(item)
-                    if job is None:
-                        rejected += 1
-                        continue
-                    if job.original_url not in all_jobs:
-                        all_jobs[job.original_url] = job
-                        kept += 1
-
-                logger.info(
-                    f"  Page {page}: {len(items)} results, {kept} kept, {rejected} rejected (listings)"
+            jobs = []
+            if html:
+                jobs = _parse_indeed_html(html)
+                logger.info(f"  Parsed {len(jobs)} jobs from HTML (HTML size: {len(html)} chars)")
+            else:
+                keys = list(data.keys())
+                logger.warning(
+                    f"  No HTML content. Serper response keys: {keys}"
                 )
-                time.sleep(REQUEST_DELAY_SEC)
 
-    logger.info(f"Serper scraper kept {len(all_jobs)} individual job listings.")
+            for job in jobs:
+                key = job.external_id or job.original_url
+                if key and key not in all_jobs:
+                    all_jobs[key] = job
+
+            time.sleep(REQUEST_DELAY_SEC)
+
+    logger.info(f"Indeed scraper kept {len(all_jobs)} unique jobs.")
     return list(all_jobs.values())
 
 
-# Backwards compatibility
+# Backwards compatibility with run.py
 def scrape_indeed(*args, **kwargs):
     return search_jobs()
