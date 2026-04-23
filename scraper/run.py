@@ -3,10 +3,10 @@ Main scraper runner. This is the entry point invoked by the Railway cron every 2
 
 Pipeline:
     1. Start a scraping_run log entry
-    2. Scrape Indeed (or all active sources)
-    3. Compute fingerprint for each raw job → dedup against existing DB
+    2. Scrape configured sources (via Serper.dev)
+    3. Compute fingerprint for each raw job, dedup against existing DB
     4. For NEW jobs only, send to Claude for classification
-    5. Insert/update jobs in DB based on Claude's output
+    5. Insert/update jobs in DB based on Claude's output (per-job try/except)
     6. Remove jobs from DB that weren't seen this run (source removed them)
     7. Finalize the scraping_run log with stats
 
@@ -17,11 +17,11 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional
 
-# Ensure backend models are importable
 from db import get_session
 from models import Job, Employer, Source, JobSource, ScrapingRun
 
-from indeed import scrape_indeed, RawJobListing
+# IMPORTANT: use serper_search, not indeed — direct Indeed scraping gets 403'd
+from serper_search import scrape_indeed, RawJobListing
 from dedup import make_fingerprint, normalize_employer_name
 from ai_filter import classify_batch, estimate_cost
 
@@ -54,11 +54,7 @@ def get_or_create_employer(db, name: str) -> Optional[Employer]:
 
 
 def process_source(source_name: str, run_id: int) -> dict:
-    """
-    Scrape one source, run AI classification, upsert into DB, prune removed.
-
-    Returns a stats dict.
-    """
+    """Scrape one source, run AI classification, upsert into DB, prune removed."""
     stats = {
         "jobs_scraped": 0,
         "jobs_new": 0,
@@ -74,7 +70,9 @@ def process_source(source_name: str, run_id: int) -> dict:
         source = get_or_create_source(db, source_name)
 
         # --- 1. SCRAPE ---
-        logger.info(f"Scraping {source_name}...")
+        # scrape_indeed() is now a Serper-backed alias that returns results
+        # from Indeed, Jobboom, Jobillico, Guichet-Emplois, etc.
+        logger.info(f"Scraping via Serper for source group '{source_name}'...")
         if source_name == "indeed":
             raw_jobs = scrape_indeed()
         else:
@@ -87,7 +85,6 @@ def process_source(source_name: str, run_id: int) -> dict:
             return stats
 
         # --- 2. DEDUP against existing DB ---
-        # For each raw job, compute a fingerprint. Separate into "new" vs "seen".
         raw_with_fp = []
         for rj in raw_jobs:
             fp = make_fingerprint(rj.employer_name or "", rj.title, rj.location_text or "")
@@ -104,24 +101,26 @@ def process_source(source_name: str, run_id: int) -> dict:
         new_items = [(fp, rj) for fp, rj in raw_with_fp if fp not in existing_by_fp]
         seen_items = [(fp, rj) for fp, rj in raw_with_fp if fp in existing_by_fp]
 
-        logger.info(
-            f"{len(new_items)} new jobs, {len(seen_items)} already known."
-        )
+        logger.info(f"{len(new_items)} new jobs, {len(seen_items)} already known.")
 
         # --- 3. UPDATE last_seen_at for jobs we saw again ---
         now = datetime.now(timezone.utc)
         for fp, rj in seen_items:
             job = existing_by_fp[fp]
             job.last_seen_at = now
-            # Also refresh the job_sources entry for this source
             js = next((s for s in job.job_sources if s.source_id == source.id), None)
             if js:
                 js.last_seen_at = now
             else:
-                db.add(JobSource(
-                    job_id=job.id, source_id=source.id,
-                    source_url=rj.original_url,
-                ))
+                try:
+                    db.add(JobSource(
+                        job_id=job.id, source_id=source.id,
+                        source_url=rj.original_url[:1000],
+                    ))
+                    db.flush()
+                except Exception as e:
+                    logger.warning(f"Could not add JobSource for existing job {job.id}: {e}")
+                    db.rollback()
         stats["jobs_updated"] = len(seen_items)
         db.commit()
 
@@ -129,14 +128,12 @@ def process_source(source_name: str, run_id: int) -> dict:
         if new_items:
             raw_dicts = [rj.to_dict() for _, rj in new_items]
 
-            # Batch to avoid giant prompts — max 10 per call
             BATCH_SIZE = 10
             classified_all = []
             for i in range(0, len(raw_dicts), BATCH_SIZE):
                 batch = raw_dicts[i : i + BATCH_SIZE]
                 try:
                     classified = classify_batch(batch)
-                    # Correct the index offsets for our flat list
                     for c in classified:
                         c["index"] = c["index"] + i
                     classified_all.extend(classified)
@@ -146,8 +143,7 @@ def process_source(source_name: str, run_id: int) -> dict:
                     continue
 
             # --- 5. INSERT new jobs into DB ---
-            # Track fingerprints we've already seen in THIS run, to avoid
-            # duplicate-key errors when multiple sources return the same job.
+            # Track fingerprints seen in THIS run to avoid duplicate-key errors
             seen_fingerprints_this_run: set[str] = set()
 
             for c in classified_all:
@@ -157,24 +153,24 @@ def process_source(source_name: str, run_id: int) -> dict:
 
                 fp, rj = new_items[idx]
 
-                # Skip irrelevant jobs entirely — don't pollute DB
+                # Skip irrelevant jobs entirely
                 if not c.get("is_relevant", False):
                     continue
 
-                # Skip if we already inserted this fingerprint in this run
+                # Skip intra-run duplicates
                 if fp in seen_fingerprints_this_run:
-                    logger.debug(f"Skipping intra-run duplicate fingerprint: {rj.title}")
+                    logger.debug(f"Skipping intra-run duplicate: {rj.title}")
                     continue
 
                 try:
-                    employer = get_or_create_employer(db, c.get("employer_name") or rj.employer_name)
+                    employer = get_or_create_employer(
+                        db, c.get("employer_name") or rj.employer_name
+                    )
 
                     needs_review = c.get("needs_review", False)
                     confidence = c.get("confidence", 0.0) or 0.0
-                    # Auto-approve only if high confidence AND not flagged for review
                     is_approved = (not needs_review) and confidence >= 0.85
 
-                    # Truncate long string fields to DB limits (defensive)
                     def _clip(val, n):
                         if val is None:
                             return None
@@ -215,7 +211,7 @@ def process_source(source_name: str, run_id: int) -> dict:
                     ))
                     db.flush()
 
-                    # Commit per-job so one bad row doesn't blow the whole batch
+                    # Commit per-job so one bad row doesn't blow up the whole batch
                     db.commit()
 
                     seen_fingerprints_this_run.add(fp)
@@ -224,7 +220,6 @@ def process_source(source_name: str, run_id: int) -> dict:
                         stats["jobs_flagged"] += 1
 
                 except Exception as e:
-                    # Roll back just this one insert and keep going
                     logger.warning(
                         f"Failed to insert job {rj.title!r} "
                         f"(employer={rj.employer_name!r}): {type(e).__name__}: {e}"
@@ -233,8 +228,6 @@ def process_source(source_name: str, run_id: int) -> dict:
                     continue
 
         # --- 6. REMOVE jobs from this source that we didn't see this run ---
-        # A job is "gone" from this source if its job_sources entry for this source
-        # wasn't refreshed this run. If a job has no remaining sources, delete it.
         stale = (
             db.query(JobSource)
             .filter(
@@ -245,7 +238,6 @@ def process_source(source_name: str, run_id: int) -> dict:
         )
         removed_count = 0
         for js in stale:
-            # Only remove if this is the ONLY source for this job
             job = db.query(Job).filter(Job.id == js.job_id).first()
             if job and len(job.job_sources) <= 1:
                 db.delete(job)
@@ -269,7 +261,6 @@ def main():
     """Entry point — run all active sources."""
     db = get_session()
 
-    # Create a run log entry
     run = ScrapingRun(status="running")
     db.add(run)
     db.commit()
@@ -283,7 +274,6 @@ def main():
     error_msg = None
 
     try:
-        # Get all active sources
         active_sources = db.query(Source).filter(Source.is_active == True).all()
         for src in active_sources:
             try:
@@ -297,7 +287,6 @@ def main():
         logger.exception(f"Run failed: {e}")
         error_msg = str(e)
     finally:
-        # Refresh run entity and finalize
         run = db.query(ScrapingRun).filter(ScrapingRun.id == run_id).first()
         run.finished_at = datetime.now(timezone.utc)
         run.status = "failed" if error_msg else "success"
