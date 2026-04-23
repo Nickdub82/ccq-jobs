@@ -172,8 +172,49 @@ def process_source(source_name: str, run_id: int) -> dict:
                     is_ccq_flag = bool(c.get("is_ccq", False))
                     has_employer = bool(c.get("employer_name") or rj.employer_name)
 
-                    # Auto-approve rules:
-                    #   - Claude explicitly says CCQ + we know the employer + decent confidence (>= 0.70)
+                    # ----- Keyword rules: focused on unambiguous CCQ signals -----
+                    # Rule of thumb (from domain expertise):
+                    # CCQ work is defined by the *contract nature*, not the building type.
+                    # A residential construction site CAN be CCQ, so we do NOT exclude
+                    # residential. Instead, we only boost when we see unambiguous signals.
+                    all_text = " ".join(filter(None, [
+                        (c.get("title") or rj.title or ""),
+                        (c.get("description_clean") or rj.description_snippet or ""),
+                    ])).lower()
+
+                    # Unambiguous CCQ signals — if ANY is present, trust it's CCQ.
+                    strong_ccq_keywords = [
+                        "ccq",
+                        "carte ccq",
+                        "carte valide",
+                        "cartes obligatoires",
+                        "carte obligatoire",
+                        "carte de compétence",
+                        "carte de competence",
+                        "compétence ccq",
+                        "competence ccq",
+                        "convention ccq",
+                        "convention collective ccq",
+                        "r-20",
+                        "r20",
+                        "commercial",
+                        "industriel",
+                        "industrial",
+                        "apprenti",
+                        "compagnon",
+                    ]
+                    has_strong_signal = any(k in all_text for k in strong_ccq_keywords)
+
+                    if has_strong_signal:
+                        # Domain rule: trust the CCQ signals, override & boost
+                        is_ccq_flag = True
+                        if confidence < 0.75:
+                            confidence = max(confidence, 0.75)
+                        if needs_review and confidence >= 0.70:
+                            needs_review = False
+
+                    # Auto-approve rules (relaxed since keyword boost is strong signal):
+                    #   - CCQ confirmed + employer known + decent confidence (>= 0.70)
                     #   - OR very high confidence regardless (>= 0.85)
                     # In both cases, Claude must NOT have flagged it for review.
                     is_approved = (not needs_review) and (
