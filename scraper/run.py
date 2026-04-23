@@ -1,11 +1,10 @@
 """
-Scraper pipeline orchestration — Gmail + Claude edition.
+Scraper pipeline orchestration — Gmail + Claude edition (v2).
 
-Flow:
-    1. Fetch Indeed alert emails from Gmail (last 48h)
-    2. For each email, ask Claude to extract individual jobs as JSON
-    3. Dedup against DB (by URL or employer+title+location fingerprint)
-    4. Insert new jobs into DB (with CCQ preliminary assessment from Claude)
+v2 changes:
+- Skip saving jobs that are clearly NOT CCQ with high confidence (reduce noise)
+- Auto-approve jobs that are clearly CCQ
+- Only use review queue for genuine ambiguity
 """
 import logging
 import sys
@@ -56,8 +55,32 @@ def get_or_create_employer(db, name: str):
     return emp
 
 
+def decide_job_status(is_likely_ccq: bool, ccq_confidence: float, claude_needs_review: bool):
+    """
+    Decide what to do with a job based on Claude's classification.
+
+    Returns (action, is_approved, needs_review):
+        action: 'save_approved' | 'save_review' | 'skip'
+        is_approved: bool
+        needs_review: bool
+    """
+    # Clearly NOT CCQ with high confidence -> skip entirely (don't pollute DB or review queue)
+    if not is_likely_ccq and ccq_confidence >= 0.80:
+        return ("skip", False, False)
+
+    # Claude asked for review -> save to review queue
+    if claude_needs_review:
+        return ("save_review", False, True)
+
+    # CCQ with good confidence -> auto-approve
+    if is_likely_ccq and ccq_confidence >= 0.75:
+        return ("save_approved", True, False)
+
+    # Ambiguous middle ground -> review queue
+    return ("save_review", False, True)
+
+
 def process_emails(run_id: int) -> dict:
-    """Fetch emails, extract jobs via Claude, write to DB."""
     logger.info("Fetching Indeed alert emails from Gmail...")
 
     try:
@@ -70,7 +93,6 @@ def process_emails(run_id: int) -> dict:
         logger.info("No Indeed emails found.")
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
 
-    # Step 1: Ask Claude to extract jobs from each email
     all_extracted = []
     ai_calls = 0
     for email in emails:
@@ -78,7 +100,6 @@ def process_emails(run_id: int) -> dict:
             jobs = email_parser.extract_jobs_from_email(email)
             ai_calls += 1
             for job in jobs:
-                # Attach source info from the email sender
                 job["_email_sender"] = email.sender
                 job["_email_id"] = email.message_id
                 all_extracted.append(job)
@@ -89,21 +110,16 @@ def process_emails(run_id: int) -> dict:
     logger.info(f"Total jobs extracted by Claude: {len(all_extracted)}")
 
     if not all_extracted:
-        return {
-            "jobs_scraped": 0,
-            "jobs_new": 0,
-            "ai_calls": ai_calls,
-        }
+        return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": ai_calls}
 
-    # Step 2: Dedup + insert into DB
     db = get_session()
-    inserted = 0
+    inserted_approved = 0
+    inserted_review = 0
+    skipped_non_ccq = 0
     updated = 0
-    flagged = 0
     ccq_count = 0
 
     try:
-        # Determine source from sender (indeed/jobillico/jobboom)
         src_indeed = get_or_create_source(db, "indeed")
 
         for job in all_extracted:
@@ -116,9 +132,21 @@ def process_emails(run_id: int) -> dict:
                 logger.warning(f"Skipping job with missing title/url: {job}")
                 continue
 
+            is_likely_ccq = bool(job.get("is_likely_ccq", False))
+            ccq_confidence = float(job.get("ccq_confidence", 0) or 0)
+            claude_needs_review = bool(job.get("needs_review", False))
+
+            action, is_approved, needs_review = decide_job_status(
+                is_likely_ccq, ccq_confidence, claude_needs_review
+            )
+
+            if action == "skip":
+                logger.info(f"Skipping non-CCQ job: {title} (conf: {ccq_confidence})")
+                skipped_non_ccq += 1
+                continue
+
             fp = make_fingerprint(employer_name, title, location)
 
-            # Dedup check
             existing = db.query(Job).filter_by(fingerprint=fp).first()
             if existing:
                 existing.last_seen_at = datetime.now(timezone.utc)
@@ -126,26 +154,11 @@ def process_emails(run_id: int) -> dict:
                 updated += 1
                 continue
 
-            # Determine source
-            sender_low = (job.get("_email_sender") or "").lower()
-            if "indeed" in sender_low:
-                src = src_indeed
-            else:
-                src = src_indeed  # default for now; expand when we add Jobillico/Jobboom
-
             employer = get_or_create_employer(db, employer_name)
-
-            # CCQ preliminary assessment
-            is_likely_ccq = bool(job.get("is_likely_ccq", False))
-            ccq_confidence = float(job.get("ccq_confidence", 0) or 0)
-
-            # Auto-approve if CCQ with high confidence, else flag for review
-            is_approved = is_likely_ccq and ccq_confidence >= 0.75
-            needs_review = not is_approved
 
             new_job = Job(
                 fingerprint=fp,
-                external_id=None,  # we could extract from URL if needed
+                external_id=None,
                 title=title,
                 description=job.get("description"),
                 employer_id=employer.id if employer else None,
@@ -154,11 +167,11 @@ def process_emails(run_id: int) -> dict:
                 region=None,
                 address=None,
                 job_type=None,
-                trade="peintre",  # we only subscribe to painter alerts
+                trade="peintre",
                 salary_text=job.get("salary_text"),
                 is_ccq=is_likely_ccq,
                 original_url=original_url,
-                source_id=src.id,
+                source_id=src_indeed.id,
                 ai_confidence=ccq_confidence,
                 ai_notes=job.get("notes"),
                 is_approved=is_approved,
@@ -170,38 +183,45 @@ def process_emails(run_id: int) -> dict:
 
             js = JobSource(
                 job_id=new_job.id,
-                source_id=src.id,
+                source_id=src_indeed.id,
                 source_url=original_url,
             )
             db.add(js)
             db.commit()
 
-            inserted += 1
-            if needs_review:
-                flagged += 1
+            if action == "save_approved":
+                inserted_approved += 1
+            else:
+                inserted_review += 1
+
             if is_likely_ccq:
                 ccq_count += 1
 
     finally:
         db.close()
 
+    logger.info(
+        f"DB writes: {inserted_approved} approved, {inserted_review} review, "
+        f"{skipped_non_ccq} skipped (non-CCQ), {updated} already in DB"
+    )
+
     return {
         "jobs_scraped": len(all_extracted),
-        "jobs_new": inserted,
+        "jobs_new": inserted_approved + inserted_review,
         "jobs_updated": updated,
         "jobs_removed": 0,
-        "jobs_flagged": flagged,
+        "jobs_flagged": inserted_review,
         "ai_calls": ai_calls,
         "ccq_identified": ccq_count,
+        "skipped_non_ccq": skipped_non_ccq,
     }
 
 
 def main():
     logger.info("=" * 60)
-    logger.info("Scraper starting up (Gmail + Claude edition)")
+    logger.info("Scraper starting up (Gmail + Claude edition v2)")
     logger.info("=" * 60)
 
-    # Smoke-test DB connection
     try:
         db = get_session()
         db.execute(__import__("sqlalchemy").text("SELECT 1"))

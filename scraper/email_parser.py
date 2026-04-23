@@ -1,8 +1,8 @@
 """
 Email -> jobs extraction using Claude.
 
-Takes a raw Indeed alert email (plaintext + HTML) and asks Claude to extract
-all the individual job listings as structured JSON with CCQ classification.
+v3: Decisive CCQ classification. When an explicit CCQ signal exists, approve.
+Don't second-guess. Only flag for review when there's genuine ambiguity.
 """
 import json
 import logging
@@ -26,112 +26,143 @@ def get_client() -> Anthropic:
     return _client
 
 
-EXTRACTION_PROMPT = """You receive the content of a single job-alert email from a Quebec job board (Indeed, Jobillico, Jobboom). Your task: extract every distinct job listing and classify whether it's a CCQ job.
+EXTRACTION_PROMPT = """You extract job listings from a Quebec job-alert email and decide if each one is a CCQ job.
 
-# ABOUT CCQ (context for your classification)
+# YOU ARE THE FILTER — BE DECISIVE
 
-The CCQ (Commission de la construction du Québec) governs construction workers in Quebec under law R-20. A "CCQ painter" is a painter working on construction sites (new builds, renovations, commercial/industrial/institutional buildings, civil engineering). They must hold a valid competency card (apprentice 1-4 or compagnon).
+You are helping a union director in Quebec find CCQ painter jobs for his members. He reads job alerts manually today. Your job is to replicate his judgment, not to be a cautious lawyer. When a signal is clear, commit to the decision. Don't hedge.
 
-# EXTRACTION — one JSON object per job
+# CONTEXT ABOUT CCQ
 
-For each job in the email, preserve original wording. Don't translate or paraphrase titles, employer names, or descriptions.
+The CCQ (Commission de la construction du Québec) governs construction workers under law R-20. CCQ painter jobs = painting work on construction sites (new builds, commercial, industrial, institutional). Workers hold competency cards (apprenti 1-4, compagnon). Residential light work (inside someone's house, retail painting), automotive paint, furniture, and factory product painting are NOT CCQ.
 
-Fields:
-- title: exact title as written
-- employer: company name, null if not shown
-- location: "City, QC" format
-- salary_text: preserve wording exactly (e.g., "25 $ - 40 $ par heure", "À discuter")
-- description: 1-3 sentences from the listing, verbatim
-- posted_text: "il y a X jours", "Publiée à l'instant", etc.
-- original_url: the EXACT href from the email (tracking links are fine, don't rewrite)
-- source: "indeed" | "jobillico" | "jobboom" (infer from sender email)
+# THE DECISION RULE — SIMPLE
 
-# CCQ CLASSIFICATION — be precise
+## RULE 1: Explicit CCQ keyword → IS CCQ. APPROVE. FULL STOP.
 
-## STRONG CCQ signals (confidence >= 0.90)
-Any of these = definitely CCQ, set is_likely_ccq=true:
-- Explicit mentions: "CCQ", "carte CCQ", "cartes CCQ", "carte requise", "cartes requises", "compétence CCQ"
-- Regulation mentions: "décret", "R-20", "selon le décret", "loi R-20"
-- Convention mentions: "selon la convention", "convention collective de la construction", "conditions salariales de la CCQ", "salaire selon convention"
-- Union mentions: "syndiqué", "FTQ-Construction", "CSN-Construction", "CSD-Construction"
+If the job title, description, or email subject mentions ANY of:
+- "CCQ", "carte CCQ", "cartes CCQ", "cartes nécessaires", "carte requise", "cartes requises", "compétence CCQ"
+- "décret", "R-20", "loi R-20", "décret de la construction"
+- "convention collective", "selon la convention", "conditions salariales de la CCQ", "salaire selon convention", "conditions selon CCQ"
+- "FTQ-Construction", "CSN-Construction", "CSD-Construction"
 
-## MEDIUM CCQ signals (confidence 0.55-0.75, set needs_review=true if no strong signal)
-Likely CCQ but not 100% explicit:
-- "Chantier", "chantier de construction", "chantier commercial", "chantier industriel"
-- Sector indicators: "commercial", "industriel", "institutionnel" (écoles, hôpitaux), "génie civil", "voirie"
-- Construction context: "nouvelle construction", "bâtiment neuf", "rénovation commerciale"
-- Employer is a known construction general contractor or specialty contractor
+→ `is_likely_ccq = true`, `needs_review = false`, `ccq_confidence = 1.0`
+→ No debate. It's CCQ. Approve.
 
-## NEGATIVE signals (is_likely_ccq=false, confidence 0.80+ that it's NOT CCQ)
-These are explicitly NOT CCQ work even if "peintre" is in the title:
-- "Peintre résidentiel" / "résidentielle" WITHOUT any construction/chantier context (= residential light work, NOT governed by R-20)
-- "Peintre automobile", "carrosserie", "auto body", "peinture de véhicules"
-- "Peintre décorateur" for private clients
-- "Peinture sur mobilier", "peinture de meubles"
-- Factory/manufacturing painting on products (not buildings)
-- Franchise-style residential services (CertaPro, Fresh Coat, etc.)
+## RULE 2: Clear disqualifier → NOT CCQ. REJECT. FULL STOP.
 
-## AMBIGUOUS cases — set needs_review=true with confidence 0.40-0.60
-- Title is just "Peintre" with no sector specified and description gives no clue
-- Employer is unknown and description is too vague to judge
-- "Peintre en bâtiment" without mention of construction/chantier/commercial context (could go either way)
+If the job is clearly one of:
+- Residential painting for private clients (houses, condos) — "peintre résidentiel" as main scope, franchise services (Spray-Net, CertaPro, Fresh Coat)
+- Automotive paint / carrosserie / auto body / vehicule painting
+- Furniture or product painting in a factory
+- Handyman / concierge / superintendent / maintenance roles
+- Not actually painting (car detailer, labor without painting, supervisor only)
+
+→ `is_likely_ccq = false`, `needs_review = false`, `ccq_confidence = 0.90`
+→ Reject. Don't bother the director.
+
+## RULE 3: Construction context without explicit CCQ mention → IS CCQ, approved.
+
+If no explicit CCQ keyword BUT the job is clearly construction work:
+- "Chantier commercial", "chantier industriel", "chantier institutionnel"
+- "Peintre en bâtiment" for a construction contractor (not a residential service)
+- Industrial painting of structures (not products) — e.g., painting pipes, steel frames, bridges
+- Commercial/industrial buildings in the description
+- Employer is a construction general contractor or specialty construction company
+
+→ `is_likely_ccq = true`, `needs_review = false`, `ccq_confidence = 0.85`
+
+## RULE 4: Genuine ambiguity → REVIEW.
+
+Only flag for review when:
+- Job title is generic "Peintre" or "Painter" AND
+- Description doesn't say construction/chantier/commercial/CCQ AND
+- Employer name gives no clue (unknown small company)
+
+→ `is_likely_ccq = true` (err on the side of showing it), `needs_review = true`, `ccq_confidence = 0.50`
+
+# IMPORTANT: THE EMAIL SUBJECT IS A SIGNAL
+
+The email subject line (e.g., "Votre alerte Emploi peintre CCQ...") tells you what SEARCH the director set up. If the alert keyword is "peintre CCQ" and the job matches painter criteria, it's VERY LIKELY what he's looking for. Use this as context.
 
 # SALARY IS NOT A CCQ CRITERION
 
-Do NOT use hourly rates to decide CCQ status. CCQ painter rates range from 24.35$/h (apprenti 1) to 40.58$/h (compagnon), and vary by sector (residential heavy, commercial, industrial, civil engineering). A low rate doesn't rule out CCQ — it might just be an apprentice. Preserve the salary_text field but don't let it influence is_likely_ccq.
+CCQ painter rates range from 24.35$/h (apprenti 1) to 40.58$/h (compagnon), and vary by sector. DO NOT use hourly rates to classify CCQ status. A low rate might just mean apprentice. Preserve salary_text but don't let it drive is_likely_ccq.
 
-# OUTPUT
+# EXTRACTION — ONE JSON OBJECT PER JOB
 
-Strict JSON only, no markdown fences, no preamble:
+For each job in the email, preserve original wording exactly. Don't translate titles or employer names.
+
+Fields:
+- title: exact title
+- employer: company name, null if missing
+- location: "City, QC"
+- salary_text: preserve wording
+- description: 1-3 sentences, verbatim
+- posted_text: "il y a X jours", etc.
+- original_url: exact href from email (tracking links are fine)
+- source: "indeed" | "jobillico" | "jobboom"
+- is_likely_ccq: bool (per rules above)
+- ccq_confidence: float (per rules above)
+- needs_review: bool (per rules above)
+- notes: 1 short sentence explaining your decision
+
+# OUTPUT — strict JSON, no markdown fences
 
 {
   "jobs": [
     {
-      "title": "Peintre en bâtiment — chantier commercial",
-      "employer": "Construction ABC",
-      "location": "Montréal, QC",
-      "salary_text": "selon la convention CCQ",
-      "description": "Recherchons peintre avec carte CCQ valide pour projet commercial de 8 mois...",
-      "posted_text": "il y a 2 jours",
-      "original_url": "https://ca.indeed.com/viewjob?jk=abc123",
+      "title": "...",
+      "employer": "...",
+      "location": "...",
+      "salary_text": "...",
+      "description": "...",
+      "posted_text": "...",
+      "original_url": "...",
       "source": "indeed",
       "is_likely_ccq": true,
-      "ccq_confidence": 0.95,
+      "ccq_confidence": 1.0,
       "needs_review": false,
-      "notes": "Explicit CCQ card requirement + commercial chantier"
+      "notes": "..."
     }
   ]
 }
 
 # EXAMPLES
 
-## Example 1 — CLEAR CCQ
-Description: "Carte CCQ obligatoire. Chantier commercial à Laval."
-→ is_likely_ccq=true, ccq_confidence=0.98, needs_review=false
+## Email subject "Votre alerte peintre CCQ", job "Peintre / Spraymen — H-Tag Peintres"
+Alert is specifically for CCQ + job is painter + industrial context (spray) + rate 37-43$ consistent with compagnon. No disqualifier.
+→ is_likely_ccq=true, ccq_confidence=0.85, needs_review=false
+→ notes: "Alert is for peintre CCQ; industrial spray painting role fits CCQ construction painter scope."
 
-## Example 2 — NOT CCQ
-Title: "Peintre résidentiel", Description: "Équipe sympa, clients particuliers, peinture intérieure."
-→ is_likely_ccq=false, ccq_confidence=0.88, needs_review=false
-(Residential service, no construction context)
+## Job description says "carte CCQ obligatoire"
+Rule 1 triggered.
+→ is_likely_ccq=true, ccq_confidence=1.0, needs_review=false
+→ notes: "Explicit 'carte CCQ obligatoire' in description."
 
-## Example 3 — NEEDS REVIEW
-Title: "Peintre en bâtiment", Description: "Candidat expérimenté recherché. Région de Montréal."
-→ is_likely_ccq=true, ccq_confidence=0.55, needs_review=true
-(Could be CCQ but nothing explicit)
+## Job title "Peintre résidentiel", employer "Peinture Domicile Plus"
+Rule 2 triggered.
+→ is_likely_ccq=false, ccq_confidence=0.90, needs_review=false
+→ notes: "Explicit residential painter, private homes."
 
-## Example 4 — NOT CCQ despite "industriel"
-Title: "Peintre industriel", Description: "Usine de meubles. Pulvérisation au pistolet sur produits finis."
-→ is_likely_ccq=false, ccq_confidence=0.85, needs_review=false
-(Manufacturing on products, not construction)
+## Job title "Painter", description "Apply coatings on our manufacturing line", employer "ABC Manufacturing"
+Rule 2 triggered (factory product painting).
+→ is_likely_ccq=false, ccq_confidence=0.90, needs_review=false
+→ notes: "Manufacturing product painting, not construction."
 
-## Example 5 — CCQ inferred from context
-Description: "Selon le décret de la construction. Travail en équipe sur divers chantiers."
-→ is_likely_ccq=true, ccq_confidence=0.95, needs_review=false
-(Explicit "décret de la construction")
+## Job title "Peintre en bâtiment", employer "Les Entreprises Dubé Construction", description vague
+Rule 3 triggered — construction contractor + building painter.
+→ is_likely_ccq=true, ccq_confidence=0.85, needs_review=false
+→ notes: "Construction contractor hiring building painter — CCQ construction painter scope."
+
+## Job title "Peintre", no description, unknown small employer
+Rule 4 triggered.
+→ is_likely_ccq=true, ccq_confidence=0.50, needs_review=true
+→ notes: "Generic painter title with no context; needs manual review."
 
 # IF EMAIL HAS NO JOBS
 
-Return {"jobs": []} — for example if the email is a confirmation, promotional, or system notification.
+Return {"jobs": []}.
 """
 
 
