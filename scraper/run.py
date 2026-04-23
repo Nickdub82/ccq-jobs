@@ -21,7 +21,7 @@ from typing import Optional
 from db import get_session
 from models import Job, Employer, Source, JobSource, ScrapingRun
 
-from serper_search import scrape_indeed, RawJobListing
+from indeed import scrape_indeed, RawJobListing
 from dedup import make_fingerprint, normalize_employer_name
 from ai_filter import classify_batch, estimate_cost
 
@@ -146,6 +146,10 @@ def process_source(source_name: str, run_id: int) -> dict:
                     continue
 
             # --- 5. INSERT new jobs into DB ---
+            # Track fingerprints we've already seen in THIS run, to avoid
+            # duplicate-key errors when multiple sources return the same job.
+            seen_fingerprints_this_run: set[str] = set()
+
             for c in classified_all:
                 idx = c.get("index", -1)
                 if idx < 0 or idx >= len(new_items):
@@ -157,51 +161,76 @@ def process_source(source_name: str, run_id: int) -> dict:
                 if not c.get("is_relevant", False):
                     continue
 
-                employer = get_or_create_employer(db, c.get("employer_name") or rj.employer_name)
+                # Skip if we already inserted this fingerprint in this run
+                if fp in seen_fingerprints_this_run:
+                    logger.debug(f"Skipping intra-run duplicate fingerprint: {rj.title}")
+                    continue
 
-                needs_review = c.get("needs_review", False)
-                confidence = c.get("confidence", 0.0)
-                # Auto-approve only if high confidence and not flagged for review
-                is_approved = (not needs_review) and confidence >= 0.85
+                try:
+                    employer = get_or_create_employer(db, c.get("employer_name") or rj.employer_name)
 
-                job = Job(
-                    fingerprint=fp,
-                    external_id=rj.external_id,
-                    title=c.get("title") or rj.title,
-                    description=c.get("description_clean") or rj.description_snippet,
-                    employer_id=employer.id if employer else None,
-                    location_text=rj.location_text,
-                    city=c.get("city"),
-                    region=c.get("region"),
-                    address=c.get("address"),
-                    job_type=c.get("job_type"),
-                    trade=c.get("trade"),
-                    salary_text=c.get("salary_text") or rj.salary_text,
-                    is_ccq=c.get("is_ccq", False),
-                    original_url=rj.original_url,
-                    source_id=source.id,
-                    posted_at=None,  # Indeed "posted_text" is relative; parse in V2
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    ai_confidence=confidence,
-                    ai_notes=c.get("notes"),
-                    is_approved=is_approved,
-                    needs_review=needs_review,
-                )
-                db.add(job)
-                db.flush()
+                    needs_review = c.get("needs_review", False)
+                    confidence = c.get("confidence", 0.0) or 0.0
+                    # Auto-approve only if high confidence AND not flagged for review
+                    is_approved = (not needs_review) and confidence >= 0.85
 
-                db.add(JobSource(
-                    job_id=job.id,
-                    source_id=source.id,
-                    source_url=rj.original_url,
-                ))
+                    # Truncate long string fields to DB limits (defensive)
+                    def _clip(val, n):
+                        if val is None:
+                            return None
+                        s = str(val)
+                        return s[:n] if len(s) > n else s
 
-                stats["jobs_new"] += 1
-                if needs_review:
-                    stats["jobs_flagged"] += 1
+                    job = Job(
+                        fingerprint=fp,
+                        external_id=_clip(rj.external_id, 200),
+                        title=_clip(c.get("title") or rj.title, 500),
+                        description=c.get("description_clean") or rj.description_snippet,
+                        employer_id=employer.id if employer else None,
+                        location_text=_clip(rj.location_text, 300),
+                        city=_clip(c.get("city"), 100),
+                        region=_clip(c.get("region"), 100),
+                        address=_clip(c.get("address"), 500),
+                        job_type=_clip(c.get("job_type"), 50),
+                        trade=_clip(c.get("trade"), 100),
+                        salary_text=_clip(c.get("salary_text") or rj.salary_text, 200),
+                        is_ccq=bool(c.get("is_ccq", False)),
+                        original_url=_clip(rj.original_url, 1000),
+                        source_id=source.id,
+                        posted_at=None,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        ai_confidence=confidence,
+                        ai_notes=c.get("notes"),
+                        is_approved=is_approved,
+                        needs_review=needs_review,
+                    )
+                    db.add(job)
+                    db.flush()
 
-            db.commit()
+                    db.add(JobSource(
+                        job_id=job.id,
+                        source_id=source.id,
+                        source_url=_clip(rj.original_url, 1000),
+                    ))
+                    db.flush()
+
+                    # Commit per-job so one bad row doesn't blow the whole batch
+                    db.commit()
+
+                    seen_fingerprints_this_run.add(fp)
+                    stats["jobs_new"] += 1
+                    if needs_review:
+                        stats["jobs_flagged"] += 1
+
+                except Exception as e:
+                    # Roll back just this one insert and keep going
+                    logger.warning(
+                        f"Failed to insert job {rj.title!r} "
+                        f"(employer={rj.employer_name!r}): {type(e).__name__}: {e}"
+                    )
+                    db.rollback()
+                    continue
 
         # --- 6. REMOVE jobs from this source that we didn't see this run ---
         # A job is "gone" from this source if its job_sources entry for this source
