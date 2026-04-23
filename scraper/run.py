@@ -169,7 +169,17 @@ def process_source(source_name: str, run_id: int) -> dict:
 
                     needs_review = c.get("needs_review", False)
                     confidence = c.get("confidence", 0.0) or 0.0
-                    is_approved = (not needs_review) and confidence >= 0.85
+                    is_ccq_flag = bool(c.get("is_ccq", False))
+                    has_employer = bool(c.get("employer_name") or rj.employer_name)
+
+                    # Auto-approve rules:
+                    #   - Claude explicitly says CCQ + we know the employer + decent confidence (>= 0.70)
+                    #   - OR very high confidence regardless (>= 0.85)
+                    # In both cases, Claude must NOT have flagged it for review.
+                    is_approved = (not needs_review) and (
+                        (is_ccq_flag and has_employer and confidence >= 0.70)
+                        or confidence >= 0.85
+                    )
 
                     def _clip(val, n):
                         if val is None:
