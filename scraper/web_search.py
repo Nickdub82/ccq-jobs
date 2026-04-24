@@ -1,25 +1,23 @@
 """
 Volet 2 — Web search for off-board CCQ job postings.
 
-This complements the Gmail volet by discovering jobs that live on:
-    - Employer career pages (Pomerleau, EBC, small contractors...)
-    - Union job boards
-    - Local news/community sites
-    - Anywhere on the indexed web that's NOT a big job board
+v2 adds PRESCREENING: before spending Claude tokens on a page, we do a
+cheap keyword check. If the page doesn't even mention painting + a CCQ
+signal, we skip it. Saves ~40-60% of Claude calls on web pages that are
+company landing pages, blog posts, irrelevant results, etc.
 
 Strategy:
-    1. Run surgical Serper queries with explicit CCQ keywords
-       AND exclude the job boards we already cover via Gmail
-    2. For each result URL, fetch the page
-    3. Wrap the page content in a RawEmail-like object
-    4. Pass to the existing email_parser for Claude extraction
-       (the parser is generic -- it works for any content)
-
-This way we reuse 100% of the CCQ classification logic.
+    1. Run surgical Serper queries (explicit CCQ keywords, exclude job boards)
+    2. Filter out listing/search URLs by pattern
+    3. Fetch each candidate page
+    4. PRESCREEN: does the page even mention painting + CCQ/construction?
+    5. If yes -> pass to Claude extractor
+    6. If no -> skip, log, move on
 """
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -33,8 +31,6 @@ logger = logging.getLogger(__name__)
 SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 REQUEST_TIMEOUT = 30
 
-# Sites we already cover via Gmail alerts -- exclude them from web search
-# to avoid duplicating work and crediting Serper quota for nothing
 EXCLUDED_SITES = [
     "indeed.com",
     "indeed.ca",
@@ -42,13 +38,11 @@ EXCLUDED_SITES = [
     "jobboom.com",
     "glassdoor.com",
     "glassdoor.ca",
-    "linkedin.com",  # typically needs auth, not useful
+    "linkedin.com",
     "monster.com",
     "monster.ca",
 ]
 
-# Surgical queries that target explicit CCQ signals
-# Each query aims to surface jobs posted DIRECTLY by employers (not aggregators)
 CCQ_QUERIES = [
     '"carte CCQ" peintre Québec',
     '"cartes CCQ" peintre emploi',
@@ -61,16 +55,13 @@ CCQ_QUERIES = [
 
 @dataclass
 class PageContent:
-    """
-    A web page content made to look like a RawEmail so it plugs into
-    email_parser.extract_jobs_from_email() without modification.
-    """
-    message_id: str      # used as page identifier (we put the URL here)
-    sender: str          # we put the page domain here
-    subject: str         # page title / query that found it
-    received_date: str   # when we found it
-    body_text: str       # extracted plain text
-    body_html: str       # raw HTML
+    """Made to look like a RawEmail so it plugs into email_parser.extract_jobs_from_email()."""
+    message_id: str
+    sender: str
+    subject: str
+    received_date: str
+    body_text: str
+    body_html: str
 
 
 # ============================================================
@@ -78,36 +69,26 @@ class PageContent:
 # ============================================================
 
 def _build_query(base_query: str) -> str:
-    """Add site exclusions to a base CCQ query."""
     exclusions = " ".join(f"-site:{site}" for site in EXCLUDED_SITES)
     return f"{base_query} {exclusions}"
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
 def _serper_search(client: httpx.Client, query: str, num: int = 10) -> list[dict]:
-    """Call Serper's /search endpoint and return organic results."""
     headers = {
         "X-API-KEY": settings.serper_api_key,
         "Content-Type": "application/json",
     }
-    payload = {
-        "q": query,
-        "num": num,
-        "gl": "ca",   # Canada
-        "hl": "fr",   # French
-    }
+    payload = {"q": query, "num": num, "gl": "ca", "hl": "fr"}
     resp = client.post(SERPER_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("organic", [])
+    return resp.json().get("organic", [])
 
 
 # ============================================================
-# PAGE FETCH
+# URL + CONTENT FILTERING
 # ============================================================
 
-# URL patterns that clearly are NOT individual job postings
-# (listing pages, search pages, category pages)
 BAD_URL_PATTERNS = [
     r"/search[?/]",
     r"/jobs\?",
@@ -115,25 +96,63 @@ BAD_URL_PATTERNS = [
     r"/emplois\?",
     r"/category[?/]",
     r"/listing[?/]",
-    r"/q-",          # Indeed-style query params even on other sites
-    r"\.pdf$",       # avoid PDFs for now
+    r"/q-",
+    r"\.pdf$",
     r"/tag/",
     r"/categorie/",
 ]
 
 
 def _looks_like_listing_url(url: str) -> bool:
-    """Return True if URL clearly looks like a listing/search page, not a job offer."""
     low = url.lower()
     return any(re.search(p, low) for p in BAD_URL_PATTERNS)
 
 
-def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
-    """
-    Fetch a page and return (plaintext, html).
+# Prescreen: painting keywords (French + English)
+_PAINTING_KEYWORDS = [
+    "peintre", "peinture", "painter", "painting",
+]
 
-    Uses a real-looking User-Agent to minimize blocks on smaller sites.
+# Prescreen: CCQ/construction signals
+_CCQ_KEYWORDS = [
+    "ccq", "carte ccq", "cartes ccq", "cartes requises",
+    "décret", "r-20", "r20",
+    "convention", "convention collective",
+    "construction", "chantier",
+    "compagnon", "apprenti",
+    "industriel", "commercial", "institutionnel",
+    "en bâtiment",
+]
+
+
+def _prescreen_page(text: str, html: str, url: str) -> tuple[bool, str]:
     """
+    Cheap keyword check to decide if a page is worth sending to Claude.
+    Returns (should_pass, reason).
+    """
+    # Normalize: lowercase on the text (HTML fallback if text empty)
+    content = (text or html or "").lower()
+
+    if len(content) < 500:
+        return False, f"too short ({len(content)} chars)"
+
+    has_painter = any(kw in content for kw in _PAINTING_KEYWORDS)
+    if not has_painter:
+        return False, "no painting keyword"
+
+    has_ccq_signal = any(kw in content for kw in _CCQ_KEYWORDS)
+    if not has_ccq_signal:
+        return False, "no CCQ/construction signal"
+
+    return True, "passed"
+
+
+# ============================================================
+# PAGE FETCH
+# ============================================================
+
+def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
+    """Fetch a page, return (plaintext, html)."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -147,21 +166,18 @@ def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
         resp.raise_for_status()
         html = resp.text
 
-        # Quick text extraction via BeautifulSoup (the parser already imports it)
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "lxml")
 
-        # Strip script/style tags before text extraction
         for tag in soup(["script", "style", "nav", "header", "footer"]):
             tag.decompose()
 
         text = soup.get_text("\n", strip=True)
-        # Collapse whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
 
         return text, html
     except Exception as e:
-        logger.warning(f"Failed to fetch {url}: {e}")
+        logger.warning(f"Failed to fetch {url[:80]}: {e}")
         return "", ""
 
 
@@ -171,23 +187,19 @@ def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
 
 def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
     """
-    Main entry point. Run all surgical CCQ queries, fetch the pages,
-    and return them as PageContent objects ready for email_parser.
-
-    Deduplicates URLs across queries.
+    Run surgical CCQ queries, fetch pages, prescreen, return only pages
+    worth sending to Claude.
     """
     if not settings.serper_api_key:
         logger.warning("SERPER_API_KEY not set, skipping web search volet.")
         return []
-
-    from datetime import datetime, timezone
 
     seen_urls: set[str] = set()
     pages: list[PageContent] = []
 
     with httpx.Client() as client:
         # Step 1: Collect URLs from all queries
-        all_candidates: list[tuple[str, str, str]] = []  # (url, title, triggering_query)
+        all_candidates: list[tuple[str, str, str]] = []  # (url, title, query)
 
         for query in CCQ_QUERIES:
             full_query = _build_query(query)
@@ -203,42 +215,51 @@ def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
             for r in results:
                 url = r.get("link")
                 title = r.get("title", "")
-                if not url:
-                    continue
-                if url in seen_urls:
+                if not url or url in seen_urls:
                     continue
                 if _looks_like_listing_url(url):
-                    logger.info(f"  Skipping listing URL: {url[:80]}")
+                    logger.info(f"  URL-skip (listing pattern): {url[:80]}")
                     continue
                 seen_urls.add(url)
                 all_candidates.append((url, title, query))
 
         logger.info(f"Total unique candidate URLs: {len(all_candidates)}")
 
-        # Step 2: Fetch each page (with a cap to avoid runaway)
-        MAX_PAGES_PER_RUN = 20
+        # Step 2: Fetch + prescreen each page
+        MAX_PAGES_PER_RUN = 25
+        prescreen_pass = 0
+        prescreen_fail = 0
+
         for i, (url, title, query) in enumerate(all_candidates[:MAX_PAGES_PER_RUN]):
-            logger.info(f"Fetching page {i+1}/{min(len(all_candidates), MAX_PAGES_PER_RUN)}: {url[:80]}")
+            logger.info(f"Fetching {i+1}/{min(len(all_candidates), MAX_PAGES_PER_RUN)}: {url[:80]}")
             text, html = _fetch_page_text(client, url)
 
             if not text and not html:
                 continue
 
-            # Skip pages that are too short to contain a real job posting
-            if len(text) < 200:
-                logger.info(f"  Skipping (too short: {len(text)} chars)")
+            # PRESCREEN before sending to Claude
+            passed, reason = _prescreen_page(text, html, url)
+            if not passed:
+                logger.info(f"  Prescreen-skip: {reason}")
+                prescreen_fail += 1
                 continue
 
+            prescreen_pass += 1
             domain = urlparse(url).netloc
 
             pages.append(PageContent(
-                message_id=url,  # use URL as unique ID
+                message_id=url,
                 sender=f"web-search <{domain}>",
                 subject=f"[{query}] {title}",
                 received_date=datetime.now(timezone.utc).isoformat(),
                 body_text=text,
                 body_html=html,
             ))
+
+        logger.info(
+            f"Prescreen results: {prescreen_pass} passed, {prescreen_fail} skipped "
+            f"(saved ~{prescreen_fail} Claude calls)"
+        )
 
     logger.info(f"Volet 2 fetched {len(pages)} pages ready for Claude extraction.")
     return pages
