@@ -1,13 +1,22 @@
 """
-Scraper pipeline orchestration — Gmail + Web Search + Claude (v4).
+Scraper pipeline orchestration — Gmail + Web Search + Claude (v5).
 
-v4 adds SOURCE CACHING:
-- Each email (by Gmail message_id) is processed ONCE, ever
-- Each web page (by URL) is processed ONCE, ever
-- Subsequent runs skip them -> no Claude tokens wasted
-- Saves ~$15-30/month and makes runs way faster after the first one
+v5 decouples the two volets:
+    - Volet 1 (Gmail) runs ONLY when current UTC hour matches GMAIL_HOUR_UTC
+      (default 22h UTC = 18h Québec EDT / 17h Québec EST)
+      -> Indeed/Glassdoor send 1 daily digest -- no point running more often
+    - Volet 2 (Web search) runs EVERY time the scheduler fires
+      -> Employer career pages can change anytime
+
+Railway cron:  0 2,10,14,18,22 * * *   (every 4-6 hours)
+    - 02 UTC = 22h Québec EDT  -> Web only
+    - 10 UTC = 06h Québec EDT  -> Web only
+    - 14 UTC = 10h Québec EDT  -> Web only
+    - 18 UTC = 14h Québec EDT  -> Web only
+    - 22 UTC = 18h Québec EDT  -> Gmail + Web (pivot)
 """
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -31,12 +40,16 @@ logging.basicConfig(
 logger = logging.getLogger("scraper.run")
 
 
+# Hour of day (UTC) when Volet 1 Gmail runs. Override via env var if needed.
+# 22h UTC = 18h Québec EDT (summer) or 17h Québec EST (winter).
+GMAIL_HOUR_UTC = int(os.environ.get("GMAIL_HOUR_UTC", "22"))
+
+
 # ============================================================
 # PROCESSED SOURCES CACHE
 # ============================================================
 
 def is_source_processed(db, source_key: str) -> bool:
-    """Has this email/URL been processed before?"""
     result = db.execute(
         sql_text("SELECT 1 FROM processed_sources WHERE source_key = :key LIMIT 1"),
         {"key": source_key},
@@ -45,8 +58,6 @@ def is_source_processed(db, source_key: str) -> bool:
 
 
 def mark_source_processed(db, source_key: str, source_type: str, jobs_count: int, notes: str = ""):
-    """Record that we've processed this source so future runs skip it."""
-    # Truncate source_key if too long (keys are 500-char VARCHAR)
     key = source_key[:500] if source_key else ""
     db.execute(
         sql_text("""
@@ -210,7 +221,6 @@ def process_volet_1_gmail(run_id: int) -> dict:
         logger.info("No inbox emails found.")
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
 
-    # Filter out emails already processed in a previous run
     db = get_session()
     try:
         new_emails = [e for e in emails if not is_source_processed(db, e.message_id)]
@@ -234,7 +244,6 @@ def process_volet_1_gmail(run_id: int) -> dict:
             jobs = email_parser.extract_jobs_from_email(email)
             ai_calls += 1
 
-            # Mark this email as processed (so we don't re-process it next run)
             db = get_session()
             try:
                 mark_source_processed(
@@ -269,7 +278,7 @@ def process_volet_1_gmail(run_id: int) -> dict:
     logger.info(
         f"Volet 1 DB writes: {stats['inserted_approved']} approved, "
         f"{stats['inserted_review']} review, {stats['skipped_non_ccq']} skipped, "
-        f"{stats['updated']} already in DB (job-level dedup)"
+        f"{stats['updated']} already in DB"
     )
 
     return {
@@ -291,7 +300,6 @@ def process_volet_2_websearch(run_id: int) -> dict:
     logger.info("VOLET 2: Web search (Serper)")
     logger.info("-" * 60)
 
-    # Get already-processed URLs so web_search can skip them before fetching
     db = get_session()
     try:
         seen_urls_rows = db.execute(
@@ -309,7 +317,6 @@ def process_volet_2_websearch(run_id: int) -> dict:
             skip_urls=seen_urls,
         )
     except TypeError:
-        # Backward compat if web_search hasn't been updated to accept skip_urls
         pages = web_search.find_ccq_job_pages(max_results_per_query=10)
         pages = [p for p in pages if p.message_id not in seen_urls]
     except Exception as e:
@@ -328,7 +335,6 @@ def process_volet_2_websearch(run_id: int) -> dict:
             jobs = email_parser.extract_jobs_from_email(page)
             ai_calls += 1
 
-            # Mark this page URL as processed
             db = get_session()
             try:
                 mark_source_processed(
@@ -362,7 +368,7 @@ def process_volet_2_websearch(run_id: int) -> dict:
     logger.info(
         f"Volet 2 DB writes: {stats['inserted_approved']} approved, "
         f"{stats['inserted_review']} review, {stats['skipped_non_ccq']} skipped, "
-        f"{stats['updated']} already in DB (job-level dedup)"
+        f"{stats['updated']} already in DB"
     )
 
     return {
@@ -379,10 +385,15 @@ def process_volet_2_websearch(run_id: int) -> dict:
 # ============================================================
 
 def main():
+    now_utc = datetime.now(timezone.utc)
+    current_hour = now_utc.hour
+
     logger.info("=" * 60)
-    logger.info("Scraper starting up (v4 with source cache)")
+    logger.info(f"Scraper v5 starting at {now_utc.isoformat()}")
+    logger.info(f"Current UTC hour: {current_hour} (Gmail runs at {GMAIL_HOUR_UTC} UTC)")
     logger.info("=" * 60)
 
+    # DB smoke test
     try:
         db = get_session()
         db.execute(sql_text("SELECT 1"))
@@ -409,14 +420,23 @@ def main():
         "ai_calls": 0,
     }
 
-    try:
-        v1_stats = process_volet_1_gmail(run_id)
-        for k, v in v1_stats.items():
-            if k in final_stats and isinstance(v, int):
-                final_stats[k] += v
-    except Exception as e:
-        logger.error(f"Volet 1 failed: {e}", exc_info=True)
+    # VOLET 1 — Gmail (only at GMAIL_HOUR_UTC)
+    if current_hour == GMAIL_HOUR_UTC:
+        logger.info(f"Hour match ({current_hour} UTC) -> running Volet 1 Gmail")
+        try:
+            v1_stats = process_volet_1_gmail(run_id)
+            for k, v in v1_stats.items():
+                if k in final_stats and isinstance(v, int):
+                    final_stats[k] += v
+        except Exception as e:
+            logger.error(f"Volet 1 failed: {e}", exc_info=True)
+    else:
+        logger.info(
+            f"Skipping Volet 1 (current hour {current_hour} != {GMAIL_HOUR_UTC} UTC). "
+            f"Gmail only checks daily at {GMAIL_HOUR_UTC}:00 UTC."
+        )
 
+    # VOLET 2 — Web search (every run)
     try:
         v2_stats = process_volet_2_websearch(run_id)
         for k, v in v2_stats.items():

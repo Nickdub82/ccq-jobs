@@ -1,5 +1,5 @@
 /* ==========================================================
-   Admin page logic — login, review queue, stats, runs log
+   Admin page logic — login, stats, review queue, approved jobs, runs log
    Password is stored in sessionStorage (cleared on tab close).
    ========================================================== */
 'use strict';
@@ -90,7 +90,7 @@ $('#btn-logout').addEventListener('click', () => {
 async function showDashboard() {
     $('#login-view').style.display = 'none';
     $('#admin-view').style.display = 'grid';
-    await Promise.all([loadStats(), loadReviewQueue(), loadRuns()]);
+    await Promise.all([loadStats(), loadReviewQueue(), loadApprovedJobs(), loadRuns()]);
 }
 
 async function loadStats() {
@@ -158,7 +158,6 @@ function reviewCard(job) {
     if (job.is_ccq) top.appendChild(el('span', { class: 'job-ccq-badge' }, '✓ CCQ présumé'));
     card.appendChild(top);
 
-    // Confidence bar
     if (job.ai_confidence != null) {
         const confPct = Math.round(job.ai_confidence * 100);
         card.appendChild(el('div', { style: 'font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:8px;' },
@@ -169,25 +168,21 @@ function reviewCard(job) {
         card.appendChild(bar);
     }
 
-    // Description snippet
     if (job.description) {
         card.appendChild(el('p', {
             style: 'font-size:14px;color:#333;margin-top:12px;line-height:1.5;'
         }, job.description.slice(0, 400) + (job.description.length > 400 ? '…' : '')));
     }
 
-    // AI notes
     if (job.ai_notes) {
         card.appendChild(el('div', { class: 'ai-notes', html: `<strong>Note Claude :</strong> ${escapeHtml(job.ai_notes)}` }));
     }
 
-    // Source link
     card.appendChild(el('div', { style: 'margin-top:12px;font-family:var(--font-mono);font-size:11px;' },
         'Source : ',
         el('a', { href: job.original_url, target: '_blank', rel: 'noopener' }, job.original_url)
     ));
 
-    // Action buttons
     const actions = el('div', { class: 'admin-actions' });
     actions.appendChild(el('button', {
         class: 'btn',
@@ -211,6 +206,92 @@ async function reviewDecision(jobId, approve, cardEl) {
             method: 'POST',
             headers: adminHeaders(),
             body: JSON.stringify({ approve }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        cardEl.style.opacity = '0.4';
+        cardEl.style.pointerEvents = 'none';
+        setTimeout(() => { cardEl.remove(); loadStats(); loadApprovedJobs(); }, 300);
+    } catch (err) {
+        alert(`Erreur: ${err.message}`);
+    }
+}
+
+// ---------- Approved jobs (visible on portal) ----------
+async function loadApprovedJobs() {
+    const list = $('#approved-list');
+    if (!list) return;  // section might not exist in old HTML
+
+    try {
+        const res = await fetch(`${API}/api/admin/approved`, { headers: adminHeaders() });
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        list.innerHTML = '';
+
+        if (!data.items.length) {
+            list.innerHTML = `
+                <div class="empty-state">
+                    <p>Aucune offre approuvée actuellement.</p>
+                </div>
+            `;
+            return;
+        }
+
+        data.items.forEach(job => list.appendChild(approvedCard(job)));
+    } catch (err) {
+        list.innerHTML = `<div class="empty-state">Erreur: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function approvedCard(job) {
+    const card = el('div', { class: 'admin-card approved' });
+
+    const top = el('div', { style: 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:8px;' });
+    top.appendChild(el('div', {},
+        el('h3', { style: 'font-family:var(--font-display);font-size:18px;color:var(--navy);margin-bottom:4px;' }, job.title),
+        el('div', { style: 'font-family:var(--font-mono);font-size:12px;color:var(--muted);' },
+            job.employer?.name || 'Employeur inconnu',
+            ' · ',
+            job.location_text || job.city || '—'
+        ),
+    ));
+    if (job.is_ccq) top.appendChild(el('span', { class: 'job-ccq-badge' }, '✓ CCQ'));
+    card.appendChild(top);
+
+    if (job.description) {
+        card.appendChild(el('p', {
+            style: 'font-size:13px;color:#555;margin-top:8px;line-height:1.4;'
+        }, job.description.slice(0, 200) + (job.description.length > 200 ? '…' : '')));
+    }
+
+    card.appendChild(el('div', { style: 'margin-top:10px;font-family:var(--font-mono);font-size:11px;color:var(--muted);' },
+        `ID #${job.id} · ajouté ${formatDate(job.first_seen_at)}`
+    ));
+
+    // Delete button
+    const actions = el('div', { class: 'admin-actions', style: 'margin-top:10px;' });
+    actions.appendChild(el('a', {
+        class: 'btn',
+        href: job.original_url,
+        target: '_blank',
+        rel: 'noopener',
+        style: 'text-decoration:none;'
+    }, 'Voir l\'offre'));
+    actions.appendChild(el('button', {
+        class: 'btn btn-danger',
+        onclick: () => deleteApprovedJob(job.id, job.title, card)
+    }, '🗑 Retirer'));
+    card.appendChild(actions);
+
+    return card;
+}
+
+async function deleteApprovedJob(jobId, title, cardEl) {
+    if (!confirm(`Retirer cette offre du portail ?\n\n"${title}"\n\nElle sera supprimée définitivement.`)) return;
+
+    try {
+        const res = await fetch(`${API}/api/admin/jobs/${jobId}`, {
+            method: 'DELETE',
+            headers: adminHeaders(),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         cardEl.style.opacity = '0.4';
@@ -290,5 +371,4 @@ function runCard(run) {
         if (ok) { showDashboard(); return; }
         sessionStorage.removeItem('ccq_admin_pw');
     }
-    // Otherwise show login
 })();
