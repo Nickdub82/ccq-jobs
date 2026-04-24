@@ -3,31 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portail emploi — Local 349 · Peintres en bâtiment</title>
+    <title>Portail emploi â€” Local 349 Â· Peintres en bÃ¢timent</title>
     <meta name="description" content="Veille quotidienne d'offres d'emploi CCQ pour les membres peintres du Local 349.">
 
-    <!-- Google Fonts: Barlow Condensed for display, Barlow for body, JetBrains Mono for data -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,700;0,800;0,900;1,800;1,900&family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
-    <!-- Leaflet for map -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<!-- ============================================================
-     HEADER — sticky, logo 349 left, nav right
-============================================================ -->
 <header class="site-header">
     <div class="header-inner">
         <a href="index.html" class="brand-link">
             <img src="assets/logo-349.png" alt="Local 349" class="brand-logo">
             <div class="brand-text">
                 <div class="brand-title">Portail emploi</div>
-                <div class="brand-sub">Local 349 · Peintres en bâtiment</div>
+                <div class="brand-sub">Local 349 Â· Peintres en bÃ¢timent</div>
             </div>
         </a>
         <nav class="site-nav">
@@ -38,30 +33,27 @@
     </div>
 </header>
 
-<!-- ============================================================
-     HERO — full-width photo, logo + slogan overlay
-============================================================ -->
 <section class="hero">
     <div class="hero-bg"></div>
     <div class="hero-overlay"></div>
     <div class="hero-content">
-        <div class="hero-eyebrow">UN MÉTIER,</div>
+        <div class="hero-eyebrow">UN MÃ‰TIER,</div>
         <h1 class="hero-title">UNE FAMILLE.</h1>
-        <p class="hero-sub">Veille quotidienne des offres CCQ au Québec.</p>
+        <p class="hero-sub">Veille quotidienne des offres CCQ au QuÃ©bec.</p>
         <div class="hero-stats" id="hero-stats">
             <div class="stat-block">
-                <div class="stat-value" id="stat-total">—</div>
+                <div class="stat-value" id="stat-total">â€”</div>
                 <div class="stat-label">Offres actives</div>
             </div>
             <div class="stat-divider"></div>
             <div class="stat-block">
-                <div class="stat-value" id="stat-ccq">—</div>
-                <div class="stat-label">Confirmées CCQ</div>
+                <div class="stat-value" id="stat-ccq">â€”</div>
+                <div class="stat-label">ConfirmÃ©es CCQ</div>
             </div>
             <div class="stat-divider"></div>
             <div class="stat-block">
-                <div class="stat-value" id="stat-updated">—</div>
-                <div class="stat-label">Dernière mise à jour</div>
+                <div class="stat-value" id="stat-updated">â€”</div>
+                <div class="stat-label">DerniÃ¨re mise Ã  jour</div>
             </div>
         </div>
         <a href="#jobs" class="hero-cta">
@@ -71,47 +63,40 @@
             </svg>
         </a>
     </div>
-    </section>
+</section>
 
-<!-- ============================================================
-     DISCLAIMER BANNER
-============================================================ -->
 <div class="disclaimer-banner">
     <div class="disclaimer-inner">
         <strong>AVIS :</strong> Ce portail rassemble des offres publiques pour informer les membres du Local 349.
-        Vérifiez toujours la légitimité de l'employeur auprès de la CCQ avant de postuler.
+        VÃ©rifiez toujours la lÃ©gitimitÃ© de l'employeur auprÃ¨s de la CCQ avant de postuler.
     </div>
 </div>
 
-<!-- ============================================================
-     JOBS SECTION — filters + cards grid
-============================================================ -->
 <section class="jobs-section" id="jobs">
     <div class="section-header">
         <div class="section-label">OFFRES DU JOUR</div>
         <h2 class="section-title">
-            <span id="jobs-count">—</span> OFFRES DISPONIBLES
+            <span id="jobs-count">â€”</span> OFFRES DISPONIBLES
         </h2>
-        <p class="section-desc">Mis à jour automatiquement toutes les 4 heures.</p>
+        <p class="section-desc">Mis Ã  jour automatiquement toutes les 4 heures.</p>
     </div>
 
     <div class="jobs-layout">
-        <!-- Filters sidebar -->
         <aside class="filters-panel">
             <div class="filter-group">
                 <label for="f-search">Recherche</label>
-                <input type="text" id="f-search" placeholder="Employeur, titre, ville…">
+                <input type="text" id="f-search" placeholder="Employeur, titre, villeâ€¦">
             </div>
             <div class="filter-group">
-                <label for="f-region">Région</label>
+                <label for="f-region">RÃ©gion</label>
                 <select id="f-region">
-                    <option value="">Toutes les régions</option>
+                    <option value="">Toutes les rÃ©gions</option>
                 </select>
             </div>
             <div class="filter-group">
-                <label for="f-trade">Métier</label>
+                <label for="f-trade">MÃ©tier</label>
                 <select id="f-trade">
-                    <option value="">Tous les métiers</option>
+                    <option value="">Tous les mÃ©tiers</option>
                     <option value="peintre">Peintre</option>
                     <option value="apprenti peintre">Apprenti peintre</option>
                     <option value="peintre compagnon">Peintre compagnon</option>
@@ -119,15 +104,14 @@
             </div>
             <label class="filter-check">
                 <input type="checkbox" id="f-ccq" checked>
-                <span>Confirmées CCQ uniquement</span>
+                <span>ConfirmÃ©es CCQ uniquement</span>
             </label>
             <div class="filter-actions">
                 <button class="btn-primary" id="btn-apply">Appliquer</button>
-                <button class="btn-ghost" id="btn-reset">Réinitialiser</button>
+                <button class="btn-ghost" id="btn-reset">RÃ©initialiser</button>
             </div>
         </aside>
 
-        <!-- Jobs list -->
         <div class="jobs-list" id="jobs-list">
             <div class="loading-state">
                 <div class="loader-dot"></div>
@@ -138,13 +122,10 @@
     </div>
 </section>
 
-<!-- ============================================================
-     MAP SECTION — integrated
-============================================================ -->
 <section class="map-section" id="map-section">
     <div class="section-header">
-        <div class="section-label">RÉGIONS ACTIVES</div>
-        <h2 class="section-title">CHANTIERS CARTOGRAPHIÉS</h2>
+        <div class="section-label">RÃ‰GIONS ACTIVES</div>
+        <h2 class="section-title">CHANTIERS CARTOGRAPHIÃ‰S</h2>
         <p class="section-desc">Visualisation des offres par localisation.</p>
     </div>
     <div class="map-wrapper">
@@ -152,27 +133,24 @@
     </div>
 </section>
 
-<!-- ============================================================
-     FOOTER
-============================================================ -->
 <footer class="site-footer">
     <div class="footer-inner">
         <div class="footer-brand">
             <img src="assets/logo-349.png" alt="Local 349" class="footer-logo">
             <div>
                 <div class="footer-brand-title">Local 349 SIPMC</div>
-                <div class="footer-brand-sub">Peintres en bâtiment du Québec</div>
+                <div class="footer-brand-sub">Peintres en bÃ¢timent du QuÃ©bec</div>
             </div>
         </div>
         <div class="footer-links">
             <a href="https://local349.com" target="_blank" rel="noopener">Site officiel</a>
-            <a href="mentions-legales.html">Mentions légales</a>
-            <a href="confidentialite.html">Confidentialité</a>
+            <a href="mentions-legales.html">Mentions lÃ©gales</a>
+            <a href="confidentialite.html">ConfidentialitÃ©</a>
             <a href="conditions.html">Conditions</a>
         </div>
         <div class="footer-legal">
-            <p>Portail d'information syndicale. Non affilié à la CCQ.</p>
-            <p>Toutes les offres redirigent vers la source originale.</p>
+            <p>Â© 2026 Local 349 SIPMC. Portail d'information syndicale.</p>
+            <p>Non affiliÃ© Ã  la CCQ Â· Toutes les offres redirigent vers la source originale.</p>
         </div>
     </div>
 </footer>
@@ -183,8 +161,3 @@
 
 </body>
 </html>
-
-
-
-
-
