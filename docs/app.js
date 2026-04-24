@@ -282,7 +282,7 @@ function renderMap(jobs) {
     let missed = 0;
 
     jobs.forEach(job => {
-        if (!job.is_approved) return;
+        
 
         let coords = null;
 
