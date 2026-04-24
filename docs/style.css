@@ -170,7 +170,7 @@ img {
 ============================================================ */
 .hero {
     position: relative;
-    min-height: 70vh;
+    min-height: 55vh;
     display: flex;
     align-items: center;
     overflow: hidden;
