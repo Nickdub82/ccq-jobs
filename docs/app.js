@@ -1,13 +1,11 @@
 /* ==========================================================
    Local 349 — Portail emploi
-   Fetches jobs, renders cards, handles filters, hero stats, map.
    ========================================================== */
 'use strict';
 
 const API = window.CCQ_CONFIG.API_BASE;
 
 const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
 
 const el = (tag, attrs = {}, ...children) => {
     const e = document.createElement(tag);
@@ -45,69 +43,38 @@ function formatRelative(iso) {
     return then.toLocaleDateString('fr-CA', { day: 'numeric', month: 'short' });
 }
 
-function normalizeKey(s) {
-    return (s || '')
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')  // strip diacritics
-        .trim();
-}
-
 // ========================================
-// DATA STATE
+// CITY COORDS — all keys lowercase, no accents
 // ========================================
-let allJobs = [];
-let mapInstance = null;
-let mapMarkers = [];
-
-// ========================================
-// QUEBEC CITY COORDS — 50+ cities
-// ========================================
-const CITY_COORDS = {
-    // Grande région de Montréal
+const CITIES = {
     'montreal': [45.5019, -73.5674],
     'laval': [45.6066, -73.7124],
     'longueuil': [45.5312, -73.5180],
     'brossard': [45.4582, -73.4663],
-    'saint-laurent': [45.5023, -73.7215],
-    'anjou': [45.6085, -73.5540],
-    'lasalle': [45.4307, -73.6388],
-    'verdun': [45.4590, -73.5693],
-    'saint-leonard': [45.5934, -73.5987],
-    'ahuntsic': [45.5528, -73.6706],
-    'pointe-claire': [45.4486, -73.8168],
-    'dorval': [45.4500, -73.7477],
-    'dollard-des-ormeaux': [45.4955, -73.8232],
-    'pierrefonds': [45.4936, -73.8596],
     'boucherville': [45.5936, -73.4366],
-    'saint-hubert': [45.4958, -73.4166],
-    'saint-bruno': [45.5372, -73.3500],
-    'saint-bruno-de-montarville': [45.5372, -73.3500],
-    'chambly': [45.4461, -73.2893],
-    'saint-jean-sur-richelieu': [45.3074, -73.2621],
     'repentigny': [45.7423, -73.4505],
     'terrebonne': [45.6985, -73.6510],
     'mascouche': [45.7497, -73.5988],
     'blainville': [45.6707, -73.8782],
     'mirabel': [45.6493, -74.0814],
-    'saint-eustache': [45.5642, -73.9090],
-    'sainte-therese': [45.6390, -73.8388],
-    'rosemere': [45.6330, -73.8019],
-    'boisbriand': [45.6163, -73.8352],
     'vaudreuil-dorion': [45.4006, -74.0330],
-    'salaberry-de-valleyfield': [45.2514, -74.1353],
-    'la prairie': [45.4178, -73.4977],
-    'candiac': [45.3833, -73.5167],
-
-    // Grande région de Québec
+    'chambly': [45.4461, -73.2893],
+    'saint-jean-sur-richelieu': [45.3074, -73.2621],
+    'saint-hubert': [45.4958, -73.4166],
+    'saint-bruno-de-montarville': [45.5372, -73.3500],
+    'anjou': [45.6085, -73.5540],
+    'saint-leonard': [45.5934, -73.5987],
+    'saint-laurent': [45.5023, -73.7215],
+    'verdun': [45.4590, -73.5693],
+    'lasalle': [45.4307, -73.6388],
+    'pointe-claire': [45.4486, -73.8168],
+    'dorval': [45.4500, -73.7477],
+    'pierrefonds': [45.4936, -73.8596],
     'quebec': [46.8139, -71.2080],
     'levis': [46.7892, -71.1784],
     'sainte-foy': [46.7688, -71.2894],
     'charlesbourg': [46.8552, -71.2709],
     'beauport': [46.8727, -71.1885],
-    'cap-rouge': [46.7486, -71.3588],
-
-    // Autres régions
     'sherbrooke': [45.4042, -71.8929],
     'trois-rivieres': [46.3432, -72.5432],
     'drummondville': [45.8833, -72.4833],
@@ -121,13 +88,11 @@ const CITY_COORDS = {
     'aylmer': [45.3992, -75.8323],
     'rimouski': [48.4489, -68.5230],
     'rouyn-noranda': [48.2363, -79.0240],
-    'val-dor': [48.0974, -77.7797],
     'saint-jerome': [45.7804, -74.0037],
     'cowansville': [45.2077, -72.7468],
     'saint-hyacinthe': [45.6301, -72.9564],
     'thetford mines': [46.1000, -71.3050],
     'victoriaville': [46.0553, -71.9599],
-    'sorel': [46.0432, -73.1138],
     'sorel-tracy': [46.0432, -73.1138],
     'joliette': [46.0225, -73.4390],
     'shawinigan': [46.5553, -72.7453],
@@ -139,38 +104,42 @@ const CITY_COORDS = {
     'gaspe': [48.8314, -64.4811],
 };
 
-function findCoords(rawLocation) {
-    if (!rawLocation) return null;
+function cleanKey(s) {
+    if (!s) return '';
+    return String(s)
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/,\s*qc.*$/i, '')
+        .trim();
+}
 
-    // Try multiple strategies
-    const candidates = [];
-    const beforeComma = rawLocation.split(',')[0].trim();
-    candidates.push(beforeComma);
-    candidates.push(rawLocation);
-
-    for (const cand of candidates) {
-        const key = normalizeKey(cand);
-        if (CITY_COORDS[key]) return CITY_COORDS[key];
-
-        // Fuzzy: strip all non-alphanumerics
-        const fuzzyKey = key.replace(/[^a-z0-9]/g, '');
-        for (const [k, v] of Object.entries(CITY_COORDS)) {
-            const kFuzzy = k.replace(/[^a-z0-9]/g, '');
-            if (kFuzzy === fuzzyKey) return v;
-        }
+function lookupCity(s) {
+    const key = cleanKey(s);
+    if (!key) return null;
+    if (CITIES[key]) return CITIES[key];
+    for (const [k, v] of Object.entries(CITIES)) {
+        if (key.includes(k) || k.includes(key)) return v;
     }
     return null;
 }
 
 // ========================================
-// FETCH JOBS
+// STATE
+// ========================================
+let allJobs = [];
+let mapInstance = null;
+let mapMarkers = [];
+
+// ========================================
+// FETCH
 // ========================================
 async function fetchJobs() {
     const params = new URLSearchParams();
-    const ccqOnly = $('#f-ccq').checked;
-    const region = $('#f-region').value;
-    const trade = $('#f-trade').value;
-    const search = $('#f-search').value.trim();
+    const ccqOnly = $('#f-ccq')?.checked;
+    const region = $('#f-region')?.value;
+    const trade = $('#f-trade')?.value;
+    const search = $('#f-search')?.value.trim();
 
     if (ccqOnly) params.append('ccq_only', 'true');
     if (region) params.append('region', region);
@@ -194,13 +163,14 @@ async function fetchJobs() {
 function renderJobs(jobs) {
     const list = $('#jobs-list');
     const countEl = $('#jobs-count');
+    if (!list) return;
     list.innerHTML = '';
-    countEl.textContent = jobs.length;
+    if (countEl) countEl.textContent = jobs.length;
 
     if (!jobs.length) {
         list.appendChild(el('div', { class: 'empty-state' },
             el('h3', {}, 'Aucune offre trouvée'),
-            el('p', {}, 'Essayez d\'élargir vos filtres ou réinitialisez la recherche.')
+            el('p', {}, 'Essayez d\'élargir vos filtres.')
         ));
         return;
     }
@@ -261,23 +231,22 @@ function jobCard(job) {
 }
 
 // ========================================
-// FILTERS — populate regions
+// FILTERS
 // ========================================
 function populateRegionFilter(jobs) {
+    const select = $('#f-region');
+    if (!select) return;
+
     const regions = [...new Set(jobs
-        .map(j => j.region || j.city || (j.location_text || '').split(',')[0].trim())
+        .map(j => (j.location_text || '').split(',')[0].trim() || j.city || j.region)
         .filter(Boolean)
     )].sort();
 
-    const select = $('#f-region');
     const current = select.value;
-
     [...select.options].slice(1).forEach(o => o.remove());
-
     regions.forEach(r => {
         select.appendChild(el('option', { value: r }, r));
     });
-
     if (current) select.value = current;
 }
 
@@ -301,37 +270,37 @@ function initMap() {
     }).addTo(mapInstance);
 }
 
-async function renderMap(jobs) {
+function renderMap(jobs) {
     if (!mapInstance) initMap();
+    if (!mapInstance) return;
 
     mapMarkers.forEach(m => m.remove());
     mapMarkers = [];
 
     const bounds = [];
-    let foundCount = 0;
-    let missedCount = 0;
+    let placed = 0;
+    let missed = 0;
 
     jobs.forEach(job => {
         if (!job.is_approved) return;
+
         let coords = null;
 
-        // 1. Precise coords from DB
         if (job.latitude && job.longitude) {
             coords = [job.latitude, job.longitude];
         } else {
-            // 2. Try to find city from multiple fields
-            coords = findCoords(job.city)
-                || findCoords(job.region)
-                || findCoords(job.location_text);
+            coords = lookupCity(job.location_text)
+                || lookupCity(job.city)
+                || lookupCity(job.region);
         }
 
         if (!coords) {
-            console.warn('No coords for job:', job.title, '|', job.location_text);
-            missedCount++;
+            console.warn('Map: no coords for', job.title, '|', job.location_text);
+            missed++;
             return;
         }
 
-        foundCount++;
+        placed++;
 
         const marker = L.circleMarker(coords, {
             radius: 11,
@@ -356,7 +325,7 @@ async function renderMap(jobs) {
         bounds.push(coords);
     });
 
-    console.info(`Map: ${foundCount} markers placed, ${missedCount} missed (no coords)`);
+    console.info(`Map: ${placed} placed, ${missed} missed`);
 
     if (bounds.length) {
         mapInstance.fitBounds(bounds, { padding: [60, 60], maxZoom: 10 });
@@ -364,30 +333,32 @@ async function renderMap(jobs) {
 }
 
 // ========================================
-// FULL RELOAD
+// RELOAD
 // ========================================
 async function reloadAll() {
     const jobs = await fetchJobs();
     allJobs = jobs;
+
     populateRegionFilter(jobs);
     renderJobs(jobs);
 
-    // Hero stats
-    $('#stat-total').textContent = jobs.length;
-    $('#stat-ccq').textContent = jobs.filter(j => j.is_ccq).length;
+    if ($('#stat-total')) $('#stat-total').textContent = jobs.length;
+    if ($('#stat-ccq')) $('#stat-ccq').textContent = jobs.filter(j => j.is_ccq).length;
     const mostRecent = jobs.reduce((max, j) => {
         const t = new Date(j.last_seen_at || j.first_seen_at).getTime();
         return t > max ? t : max;
     }, 0);
-    $('#stat-updated').textContent = mostRecent
-        ? formatRelative(new Date(mostRecent).toISOString())
-        : '—';
+    if ($('#stat-updated')) {
+        $('#stat-updated').textContent = mostRecent
+            ? formatRelative(new Date(mostRecent).toISOString())
+            : '—';
+    }
 
     renderMap(jobs);
 }
 
 // ========================================
-// EVENT HANDLERS
+// EVENTS
 // ========================================
 $('#btn-apply')?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -411,9 +382,14 @@ $('#f-search')?.addEventListener('keydown', (e) => {
 });
 
 // ========================================
-// INIT
+// INIT — wait for DOM to be ready
 // ========================================
-(async () => {
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        initMap();
+        reloadAll();
+    });
+} else {
     initMap();
-    await reloadAll();
-})();
+    reloadAll();
+}
