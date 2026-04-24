@@ -170,7 +170,7 @@ img {
 ============================================================ */
 .hero {
     position: relative;
-    min-height: 92vh;
+    min-height: 70vh;
     display: flex;
     align-items: center;
     overflow: hidden;
@@ -184,7 +184,7 @@ img {
     background-size: cover;
     background-position: center 40%;
     filter: saturate(1.1) contrast(1.05);
-    animation: heroZoom 20s ease-in-out infinite alternate;
+    
 }
 
 @keyframes heroZoom {
@@ -196,7 +196,7 @@ img {
     position: absolute;
     inset: 0;
     background:
-        linear-gradient(135deg, rgba(13,13,13,0.72) 0%, rgba(13,13,13,0.45) 50%, rgba(13,13,13,0.8) 100%),
+        linear-gradient(135deg, rgba(13,13,13,0.88) 0%, rgba(13,13,13,0.75) 50%, rgba(13,13,13,0.92) 100%),
         radial-gradient(ellipse at top left, transparent 0%, rgba(13,13,13,0.6) 70%);
 }
 
