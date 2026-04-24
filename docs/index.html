@@ -3,96 +3,187 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Offres Peintre CCQ — Montréal</title>
-    <meta name="description" content="Portail d'agrégation d'offres d'emploi publiques pour peintres CCQ au Québec.">
+    <title>Portail emploi — Local 349 · Peintres en bâtiment</title>
+    <meta name="description" content="Veille quotidienne d'offres d'emploi CCQ pour les membres peintres du Local 349.">
+
+    <!-- Google Fonts: Barlow Condensed for display, Barlow for body, JetBrains Mono for data -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,700;0,800;0,900;1,800;1,900&family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <!-- Leaflet for map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+<!-- ============================================================
+     HEADER — sticky, logo 349 left, nav right
+============================================================ -->
 <header class="site-header">
-    <div class="brand">
-        <span class="brand-mark">R-20</span>
-        <div>
-            <div class="brand-title">Chantier Jobs</div>
-            <div class="brand-sub">Veille d'offres · Peintres CCQ · Montréal</div>
-        </div>
+    <div class="header-inner">
+        <a href="index.html" class="brand-link">
+            <img src="assets/logo-349.png" alt="Local 349" class="brand-logo">
+            <div class="brand-text">
+                <div class="brand-title">Portail emploi</div>
+                <div class="brand-sub">Local 349 · Peintres en bâtiment</div>
+            </div>
+        </a>
+        <nav class="site-nav">
+            <a href="index.html" class="nav-link active">Offres</a>
+            <a href="#map-section" class="nav-link">Carte</a>
+            <a href="admin.html" class="nav-link">Admin</a>
+        </nav>
     </div>
-    <nav class="site-nav">
-        <a href="index.html" class="active">Offres</a>
-        <a href="map.html">Carte</a>
-        <a href="admin.html">Admin</a>
-    </nav>
 </header>
 
-<div class="disclaimer">
-    <strong>Avis :</strong> Ce portail agrège des offres d'emploi <strong>publiques</strong>. Non affilié à la CCQ. Postulez toujours via les canaux officiels de l'employeur.
+<!-- ============================================================
+     HERO — full-width photo, logo + slogan overlay
+============================================================ -->
+<section class="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+        <div class="hero-eyebrow">UN MÉTIER,</div>
+        <h1 class="hero-title">UNE FAMILLE.</h1>
+        <p class="hero-sub">
+            Veille quotidienne d'offres d'emploi pour les membres peintres CCQ.<br>
+            Les meilleures opportunités du Québec, rassemblées ici.
+        </p>
+        <div class="hero-stats" id="hero-stats">
+            <div class="stat-block">
+                <div class="stat-value" id="stat-total">—</div>
+                <div class="stat-label">Offres actives</div>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-block">
+                <div class="stat-value" id="stat-ccq">—</div>
+                <div class="stat-label">Confirmées CCQ</div>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-block">
+                <div class="stat-value" id="stat-updated">—</div>
+                <div class="stat-label">Dernière mise à jour</div>
+            </div>
+        </div>
+        <a href="#jobs" class="hero-cta">
+            <span>Voir les offres</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M4 8h8M8 4l4 4-4 4"/>
+            </svg>
+        </a>
+    </div>
+    <div class="hero-scroll-hint">
+        <span>SCROLLER</span>
+        <div class="scroll-line"></div>
+    </div>
+</section>
+
+<!-- ============================================================
+     DISCLAIMER BANNER
+============================================================ -->
+<div class="disclaimer-banner">
+    <div class="disclaimer-inner">
+        <strong>AVIS :</strong> Ce portail rassemble des offres publiques pour informer les membres du Local 349.
+        Vérifiez toujours la légitimité de l'employeur auprès de la CCQ avant de postuler.
+    </div>
 </div>
 
-<main class="container">
+<!-- ============================================================
+     JOBS SECTION — filters + cards grid
+============================================================ -->
+<section class="jobs-section" id="jobs">
+    <div class="section-header">
+        <div class="section-label">OFFRES DU JOUR</div>
+        <h2 class="section-title">
+            <span id="jobs-count">—</span> OFFRES DISPONIBLES
+        </h2>
+        <p class="section-desc">Mis à jour automatiquement toutes les 4 heures.</p>
+    </div>
 
-    <aside class="filters">
-        <h2>Filtres</h2>
-
-        <div class="filter-group">
-            <label for="f-search">Recherche</label>
-            <input type="text" id="f-search" placeholder="Peintre résidentiel..." autocomplete="off">
-        </div>
-
-        <div class="filter-group">
-            <label for="f-region">Région</label>
-            <select id="f-region">
-                <option value="">Toutes les régions</option>
-                <option value="Montréal">Montréal</option>
-                <option value="Laval">Laval</option>
-                <option value="Montérégie">Montérégie</option>
-                <option value="Québec">Québec</option>
-            </select>
-        </div>
-
-        <div class="filter-group">
-            <label for="f-trade">Métier</label>
-            <select id="f-trade">
-                <option value="">Tous les métiers</option>
-                <option value="peintre">Peintre</option>
-                <option value="painter">Painter</option>
-                <option value="apprenti">Apprenti-peintre</option>
-            </select>
-        </div>
-
-        <div class="filter-group">
-            <label class="checkbox-group">
-                <input type="checkbox" id="f-ccq-only" checked>
-                <span>CCQ confirmé uniquement</span>
+    <div class="jobs-layout">
+        <!-- Filters sidebar -->
+        <aside class="filters-panel">
+            <div class="filter-group">
+                <label for="f-search">Recherche</label>
+                <input type="text" id="f-search" placeholder="Employeur, titre, ville…">
+            </div>
+            <div class="filter-group">
+                <label for="f-region">Région</label>
+                <select id="f-region">
+                    <option value="">Toutes les régions</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="f-trade">Métier</label>
+                <select id="f-trade">
+                    <option value="">Tous les métiers</option>
+                    <option value="peintre">Peintre</option>
+                    <option value="apprenti peintre">Apprenti peintre</option>
+                    <option value="peintre compagnon">Peintre compagnon</option>
+                </select>
+            </div>
+            <label class="filter-check">
+                <input type="checkbox" id="f-ccq" checked>
+                <span>Confirmées CCQ uniquement</span>
             </label>
+            <div class="filter-actions">
+                <button class="btn-primary" id="btn-apply">Appliquer</button>
+                <button class="btn-ghost" id="btn-reset">Réinitialiser</button>
+            </div>
+        </aside>
+
+        <!-- Jobs list -->
+        <div class="jobs-list" id="jobs-list">
+            <div class="loading-state">
+                <div class="loader-dot"></div>
+                <div class="loader-dot"></div>
+                <div class="loader-dot"></div>
+            </div>
         </div>
+    </div>
+</section>
 
-        <button class="btn btn-full" id="btn-apply">Appliquer</button>
-        <button class="btn btn-secondary btn-full" id="btn-reset" style="margin-top: 10px;">Réinitialiser</button>
-    </aside>
+<!-- ============================================================
+     MAP SECTION — integrated
+============================================================ -->
+<section class="map-section" id="map-section">
+    <div class="section-header">
+        <div class="section-label">RÉGIONS ACTIVES</div>
+        <h2 class="section-title">CHANTIERS CARTOGRAPHIÉS</h2>
+        <p class="section-desc">Visualisation des offres par localisation.</p>
+    </div>
+    <div class="map-wrapper">
+        <div id="map"></div>
+    </div>
+</section>
 
-    <section class="results">
-        <div class="results-header">
-            <h1>Offres disponibles</h1>
-            <div class="results-count"><strong id="count">—</strong> offre(s)</div>
-        </div>
-
-        <div id="job-list" class="job-list">
-            <div class="loading-state">Chargement des offres…</div>
-        </div>
-
-        <div class="pagination" id="pagination" style="display:none;">
-            <button class="btn btn-secondary" id="prev-page">← Précédent</button>
-            <button class="btn btn-secondary" id="next-page">Suivant →</button>
-        </div>
-    </section>
-
-</main>
-
+<!-- ============================================================
+     FOOTER
+============================================================ -->
 <footer class="site-footer">
-    <p>CCQ Jobs Portal · Veille d'offres publiques · Non affilié à la CCQ</p>
-    <p style="margin-top:8px;opacity:0.7;">Toutes les offres redirigent vers la source originale.</p>
+    <div class="footer-inner">
+        <div class="footer-brand">
+            <img src="assets/logo-349.png" alt="Local 349" class="footer-logo">
+            <div>
+                <div class="footer-brand-title">Local 349 SIPMC</div>
+                <div class="footer-brand-sub">Peintres en bâtiment du Québec</div>
+            </div>
+        </div>
+        <div class="footer-links">
+            <a href="https://local349.com" target="_blank" rel="noopener">Site officiel</a>
+            <a href="https://local349.com/contact/" target="_blank" rel="noopener">Contact</a>
+            <a href="admin.html">Admin</a>
+        </div>
+        <div class="footer-legal">
+            <p>Portail d'information syndicale. Non affilié à la CCQ.</p>
+            <p>Toutes les offres redirigent vers la source originale.</p>
+        </div>
+    </div>
 </footer>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 

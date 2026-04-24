@@ -1,24 +1,15 @@
 /* ==========================================================
-   CCQ Jobs Portal — main listing logic
+   Local 349 — Portail emploi
+   Fetches jobs from backend, renders cards, handles filters,
+   populates hero stats, and draws the map.
    ========================================================== */
 'use strict';
 
 const API = window.CCQ_CONFIG.API_BASE;
 
-const state = {
-    offset: 0,
-    limit: 20,
-    filters: {
-        region: '',
-        trade: '',
-        ccq_only: true,
-        search: '',
-    },
-    total: 0,
-};
-
-// -- DOM helpers --
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
 const el = (tag, attrs = {}, ...children) => {
     const e = document.createElement(tag);
     Object.entries(attrs).forEach(([k, v]) => {
@@ -37,77 +28,71 @@ const el = (tag, attrs = {}, ...children) => {
     return e;
 };
 
-// -- Date formatting --
-function formatDate(iso) {
-    if (!iso) return '';
-    try {
-        const d = new Date(iso);
-        const now = new Date();
-        const diffMs = now - d;
-        const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        if (days === 0) return "Aujourd'hui";
-        if (days === 1) return "Hier";
-        if (days < 7) return `Il y a ${days} jours`;
-        if (days < 30) return `Il y a ${Math.floor(days / 7)} semaines`;
-        return d.toLocaleDateString('fr-CA', { day: 'numeric', month: 'short', year: 'numeric' });
-    } catch { return ''; }
-}
-
 function escapeHtml(s) {
     if (s === null || s === undefined) return '';
-    return String(s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
-// -- Fetch jobs --
-async function fetchJobs() {
-    const list = $('#job-list');
-    list.innerHTML = '<div class="loading-state">Chargement des offres…</div>';
+function formatRelative(iso) {
+    if (!iso) return '—';
+    const then = new Date(iso);
+    const diffMs = Date.now() - then.getTime();
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    if (hours < 1) return 'À l\'instant';
+    if (hours < 24) return `Il y a ${hours}h`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `Il y a ${days}j`;
+    return then.toLocaleDateString('fr-CA', { day: 'numeric', month: 'short' });
+}
 
-    const params = new URLSearchParams({
-        limit: state.limit,
-        offset: state.offset,
-        ccq_only: state.filters.ccq_only,
-    });
-    if (state.filters.region) params.append('region', state.filters.region);
-    if (state.filters.trade) params.append('trade', state.filters.trade);
-    if (state.filters.search) params.append('search', state.filters.search);
+// ========================================
+// DATA STATE
+// ========================================
+let allJobs = [];
+let mapInstance = null;
+let mapMarkers = [];
+
+// ========================================
+// FETCH JOBS
+// ========================================
+async function fetchJobs() {
+    const params = new URLSearchParams();
+    const ccqOnly = $('#f-ccq').checked;
+    const region = $('#f-region').value;
+    const trade = $('#f-trade').value;
+    const search = $('#f-search').value.trim();
+
+    if (ccqOnly) params.append('ccq_only', 'true');
+    if (region) params.append('region', region);
+    if (trade) params.append('trade', trade);
+    if (search) params.append('search', search);
 
     try {
-        const res = await fetch(`${API}/api/jobs?${params}`);
-        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        const res = await fetch(`${API}/api/jobs?${params.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-
-        state.total = data.total;
-        $('#count').textContent = data.total;
-
-        renderJobs(data.items);
-        renderPagination();
+        return data.items || [];
     } catch (err) {
-        console.error(err);
-        list.innerHTML = `
-            <div class="empty-state">
-                <h3>Erreur de chargement</h3>
-                <p>Impossible de joindre le serveur. Réessayez dans un instant.</p>
-                <p style="margin-top:8px;font-size:11px;">${escapeHtml(err.message)}</p>
-            </div>
-        `;
+        console.error('Fetch jobs failed:', err);
+        return [];
     }
 }
 
-// -- Render --
+// ========================================
+// RENDER JOBS
+// ========================================
 function renderJobs(jobs) {
-    const list = $('#job-list');
+    const list = $('#jobs-list');
+    const countEl = $('#jobs-count');
     list.innerHTML = '';
+    countEl.textContent = jobs.length;
 
     if (!jobs.length) {
-        list.innerHTML = `
-            <div class="empty-state">
-                <h3>Aucune offre trouvée</h3>
-                <p>Ajustez vos filtres ou revenez plus tard — le système se met à jour toutes les 2 heures.</p>
-            </div>
-        `;
+        list.appendChild(el('div', { class: 'empty-state' },
+            el('h3', {}, 'Aucune offre trouvée'),
+            el('p', {}, 'Essayez d\'élargir vos filtres ou réinitialisez la recherche.')
+        ));
         return;
     }
 
@@ -115,7 +100,7 @@ function renderJobs(jobs) {
 }
 
 function jobCard(job) {
-    const card = el('article', { class: 'job-card' });
+    const card = el('div', { class: 'job-card' });
 
     // Top row: title + CCQ badge
     const top = el('div', { class: 'job-card-top' });
@@ -126,99 +111,238 @@ function jobCard(job) {
     card.appendChild(top);
 
     // Employer
-    if (job.employer) {
+    if (job.employer?.name) {
         card.appendChild(el('div', { class: 'job-employer' }, job.employer.name));
     }
 
-    // Meta row
+    // Meta: location, salary, posted
     const meta = el('div', { class: 'job-meta' });
     if (job.location_text || job.city) {
-        meta.appendChild(el('span', {}, `📍 ${job.location_text || job.city}`));
+        meta.appendChild(el('div', { class: 'job-meta-item' }, job.location_text || job.city));
     }
-    if (job.job_type) meta.appendChild(el('span', {}, job.job_type));
-    if (job.salary_text) meta.appendChild(el('span', {}, `💰 ${job.salary_text}`));
-    if (job.posted_at) meta.appendChild(el('span', {}, formatDate(job.posted_at)));
-    else if (job.first_seen_at) meta.appendChild(el('span', {}, formatDate(job.first_seen_at)));
+    if (job.salary_text) {
+        meta.appendChild(el('div', { class: 'job-meta-item' }, job.salary_text));
+    }
+    meta.appendChild(el('div', { class: 'job-meta-item' }, formatRelative(job.first_seen_at)));
     card.appendChild(meta);
 
     // Description
     if (job.description) {
-        card.appendChild(el('p', { class: 'job-description' }, job.description));
+        const short = job.description.length > 260
+            ? job.description.slice(0, 260) + '…'
+            : job.description;
+        card.appendChild(el('p', { class: 'job-description' }, short));
     }
 
-    // Footer
+    // Footer: source + CTA
     const footer = el('div', { class: 'job-footer' });
+    footer.appendChild(el('div', { class: 'job-source' },
+        'Source : ',
+        el('strong', {}, job.source?.display_name || 'Web')
+    ));
 
-    const sourceEl = el('div', { class: 'job-source' });
-    const sourceLabel = job.source?.display_name || 'Source';
-    sourceEl.appendChild(el('span', { html: `Source : <strong>${escapeHtml(sourceLabel)}</strong>` }));
-    footer.appendChild(sourceEl);
-
-    const applyLink = el('a', {
-        class: 'job-apply',
+    const cta = el('a', {
         href: job.original_url,
         target: '_blank',
-        rel: 'noopener noreferrer',
-    }, 'Voir l\'offre originale →');
-    footer.appendChild(applyLink);
-
+        rel: 'noopener',
+        class: 'job-cta',
+    },
+        el('span', {}, 'Voir l\'offre'),
+        el('span', { html: '&rarr;' })
+    );
+    footer.appendChild(cta);
     card.appendChild(footer);
-
-    // Make whole card clickable (except the apply link itself)
-    card.addEventListener('click', (e) => {
-        if (e.target.closest('a')) return;
-        window.open(job.original_url, '_blank', 'noopener');
-    });
 
     return card;
 }
 
-function renderPagination() {
-    const pag = $('#pagination');
-    if (state.total <= state.limit) {
-        pag.style.display = 'none';
-        return;
+// ========================================
+// HERO STATS
+// ========================================
+async function loadHeroStats() {
+    try {
+        const jobs = await fetchJobs();
+        allJobs = jobs;
+
+        $('#stat-total').textContent = jobs.length;
+        $('#stat-ccq').textContent = jobs.filter(j => j.is_ccq).length;
+
+        // Most recent update
+        const mostRecent = jobs.reduce((max, j) => {
+            const t = new Date(j.last_seen_at || j.first_seen_at).getTime();
+            return t > max ? t : max;
+        }, 0);
+        $('#stat-updated').textContent = mostRecent
+            ? formatRelative(new Date(mostRecent).toISOString())
+            : '—';
+    } catch (err) {
+        console.error('Stats failed:', err);
     }
-    pag.style.display = 'flex';
-    $('#prev-page').disabled = state.offset === 0;
-    $('#next-page').disabled = state.offset + state.limit >= state.total;
 }
 
-// -- Event listeners --
-$('#btn-apply').addEventListener('click', () => {
-    state.filters.region   = $('#f-region').value;
-    state.filters.trade    = $('#f-trade').value;
-    state.filters.ccq_only = $('#f-ccq-only').checked;
-    state.filters.search   = $('#f-search').value.trim();
-    state.offset = 0;
-    fetchJobs();
+// ========================================
+// FILTERS — populate regions from jobs
+// ========================================
+function populateRegionFilter(jobs) {
+    const regions = [...new Set(jobs
+        .map(j => j.region || j.city)
+        .filter(Boolean)
+    )].sort();
+
+    const select = $('#f-region');
+    const current = select.value;
+
+    // Remove old dynamic options (keep only "Toutes")
+    [...select.options].slice(1).forEach(o => o.remove());
+
+    regions.forEach(r => {
+        select.appendChild(el('option', { value: r }, r));
+    });
+
+    if (current) select.value = current;
+}
+
+// ========================================
+// MAP
+// ========================================
+function initMap() {
+    if (mapInstance) return;
+    const mapEl = $('#map');
+    if (!mapEl) return;
+
+    mapInstance = L.map('map', {
+        center: [46.8, -71.5],  // Quebec province center
+        zoom: 6,
+        scrollWheelZoom: false,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap',
+        maxZoom: 18,
+    }).addTo(mapInstance);
+}
+
+async function renderMap(jobs) {
+    if (!mapInstance) initMap();
+
+    // Clear old markers
+    mapMarkers.forEach(m => m.remove());
+    mapMarkers = [];
+
+    // Approximate coords per region (fallback when no precise address)
+    const regionCoords = {
+        'Montréal': [45.5019, -73.5674],
+        'Laval': [45.6066, -73.7124],
+        'Longueuil': [45.5312, -73.5180],
+        'Québec': [46.8139, -71.2080],
+        'Outaouais': [45.4215, -75.6972],
+        'Trois-Rivières': [46.3432, -72.5432],
+        'Sherbrooke': [45.4042, -71.8929],
+        'Saguenay': [48.4280, -71.0679],
+        'Gatineau': [45.4765, -75.7013],
+        'Repentigny': [45.7423, -73.4505],
+        'Cowansville': [45.2077, -72.7468],
+    };
+
+    const bounds = [];
+
+    jobs.forEach(job => {
+        if (!job.is_approved) return;
+        let coords = null;
+
+        // Try precise coords first
+        if (job.latitude && job.longitude) {
+            coords = [job.latitude, job.longitude];
+        } else {
+            // Fallback: match city or region
+            const key = job.city || job.region || (job.location_text || '').split(',')[0].trim();
+            if (regionCoords[key]) {
+                coords = regionCoords[key];
+            }
+        }
+
+        if (!coords) return;
+
+        const marker = L.circleMarker(coords, {
+            radius: 10,
+            fillColor: '#F4BE1F',
+            color: '#0d0d0d',
+            weight: 2,
+            opacity: 1,
+            fillOpacity: 0.85,
+        }).addTo(mapInstance);
+
+        const popupHtml = `
+            <strong>${escapeHtml(job.title)}</strong><br>
+            ${escapeHtml(job.employer?.name || '')}<br>
+            ${escapeHtml(job.location_text || job.city || '')}<br>
+            <a href="${escapeHtml(job.original_url)}" target="_blank" rel="noopener"
+               style="color:#F4BE1F;font-weight:700;margin-top:8px;display:inline-block;">
+               Voir l'offre →
+            </a>
+        `;
+        marker.bindPopup(popupHtml);
+        mapMarkers.push(marker);
+        bounds.push(coords);
+    });
+
+    if (bounds.length) {
+        mapInstance.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 });
+    }
+}
+
+// ========================================
+// FULL RELOAD
+// ========================================
+async function reloadAll() {
+    const jobs = await fetchJobs();
+    allJobs = jobs;
+    populateRegionFilter(jobs);
+    renderJobs(jobs);
+
+    // Update hero stats
+    $('#stat-total').textContent = jobs.length;
+    $('#stat-ccq').textContent = jobs.filter(j => j.is_ccq).length;
+    const mostRecent = jobs.reduce((max, j) => {
+        const t = new Date(j.last_seen_at || j.first_seen_at).getTime();
+        return t > max ? t : max;
+    }, 0);
+    $('#stat-updated').textContent = mostRecent
+        ? formatRelative(new Date(mostRecent).toISOString())
+        : '—';
+
+    // Render map (only jobs that are approved will be shown)
+    renderMap(jobs);
+}
+
+// ========================================
+// EVENT HANDLERS
+// ========================================
+$('#btn-apply')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    reloadAll();
 });
 
-$('#btn-reset').addEventListener('click', () => {
+$('#btn-reset')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    $('#f-search').value = '';
     $('#f-region').value = '';
     $('#f-trade').value = '';
-    $('#f-ccq-only').checked = true;
-    $('#f-search').value = '';
-    state.filters = { region: '', trade: '', ccq_only: true, search: '' };
-    state.offset = 0;
-    fetchJobs();
+    $('#f-ccq').checked = true;
+    reloadAll();
 });
 
-$('#f-search').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $('#btn-apply').click();
+$('#f-search')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        reloadAll();
+    }
 });
 
-$('#prev-page').addEventListener('click', () => {
-    state.offset = Math.max(0, state.offset - state.limit);
-    fetchJobs();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-});
-
-$('#next-page').addEventListener('click', () => {
-    state.offset += state.limit;
-    fetchJobs();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-});
-
-// -- Initial load --
-fetchJobs();
+// ========================================
+// INIT
+// ========================================
+(async () => {
+    initMap();
+    await reloadAll();
+})();
