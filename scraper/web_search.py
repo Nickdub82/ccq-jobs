@@ -1,18 +1,17 @@
 """
 Volet 2 — Web search for off-board CCQ job postings.
 
-v2 adds PRESCREENING: before spending Claude tokens on a page, we do a
-cheap keyword check. If the page doesn't even mention painting + a CCQ
-signal, we skip it. Saves ~40-60% of Claude calls on web pages that are
-company landing pages, blog posts, irrelevant results, etc.
+v3 adds `skip_urls` parameter so run.py can pass already-processed URLs
+and we skip them BEFORE even fetching (saves HTTP requests too).
 
-Strategy:
-    1. Run surgical Serper queries (explicit CCQ keywords, exclude job boards)
-    2. Filter out listing/search URLs by pattern
-    3. Fetch each candidate page
-    4. PRESCREEN: does the page even mention painting + CCQ/construction?
-    5. If yes -> pass to Claude extractor
-    6. If no -> skip, log, move on
+Pipeline:
+    1. Serper queries with CCQ keywords + job board exclusions
+    2. Collect candidate URLs
+    3. Skip URLs already processed in previous runs (cache hit)
+    4. Skip URLs matching listing/search patterns
+    5. Fetch each new page
+    6. Prescreen (painter + CCQ keywords) before sending to Claude
+    7. Return worthy pages for extraction
 """
 import logging
 import re
@@ -32,15 +31,11 @@ SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 REQUEST_TIMEOUT = 30
 
 EXCLUDED_SITES = [
-    "indeed.com",
-    "indeed.ca",
-    "jobillico.com",
-    "jobboom.com",
-    "glassdoor.com",
-    "glassdoor.ca",
+    "indeed.com", "indeed.ca",
+    "jobillico.com", "jobboom.com",
+    "glassdoor.com", "glassdoor.ca",
     "linkedin.com",
-    "monster.com",
-    "monster.ca",
+    "monster.com", "monster.ca",
 ]
 
 CCQ_QUERIES = [
@@ -55,7 +50,6 @@ CCQ_QUERIES = [
 
 @dataclass
 class PageContent:
-    """Made to look like a RawEmail so it plugs into email_parser.extract_jobs_from_email()."""
     message_id: str
     sender: str
     subject: str
@@ -63,10 +57,6 @@ class PageContent:
     body_text: str
     body_html: str
 
-
-# ============================================================
-# SERPER SEARCH
-# ============================================================
 
 def _build_query(base_query: str) -> str:
     exclusions = " ".join(f"-site:{site}" for site in EXCLUDED_SITES)
@@ -85,21 +75,10 @@ def _serper_search(client: httpx.Client, query: str, num: int = 10) -> list[dict
     return resp.json().get("organic", [])
 
 
-# ============================================================
-# URL + CONTENT FILTERING
-# ============================================================
-
 BAD_URL_PATTERNS = [
-    r"/search[?/]",
-    r"/jobs\?",
-    r"/recherche[?/]",
-    r"/emplois\?",
-    r"/category[?/]",
-    r"/listing[?/]",
-    r"/q-",
-    r"\.pdf$",
-    r"/tag/",
-    r"/categorie/",
+    r"/search[?/]", r"/jobs\?", r"/recherche[?/]", r"/emplois\?",
+    r"/category[?/]", r"/listing[?/]", r"/q-", r"\.pdf$",
+    r"/tag/", r"/categorie/",
 ]
 
 
@@ -108,12 +87,8 @@ def _looks_like_listing_url(url: str) -> bool:
     return any(re.search(p, low) for p in BAD_URL_PATTERNS)
 
 
-# Prescreen: painting keywords (French + English)
-_PAINTING_KEYWORDS = [
-    "peintre", "peinture", "painter", "painting",
-]
+_PAINTING_KEYWORDS = ["peintre", "peinture", "painter", "painting"]
 
-# Prescreen: CCQ/construction signals
 _CCQ_KEYWORDS = [
     "ccq", "carte ccq", "cartes ccq", "cartes requises",
     "décret", "r-20", "r20",
@@ -125,34 +100,18 @@ _CCQ_KEYWORDS = [
 ]
 
 
-def _prescreen_page(text: str, html: str, url: str) -> tuple[bool, str]:
-    """
-    Cheap keyword check to decide if a page is worth sending to Claude.
-    Returns (should_pass, reason).
-    """
-    # Normalize: lowercase on the text (HTML fallback if text empty)
+def _prescreen_page(text: str, html: str) -> tuple[bool, str]:
     content = (text or html or "").lower()
-
     if len(content) < 500:
         return False, f"too short ({len(content)} chars)"
-
-    has_painter = any(kw in content for kw in _PAINTING_KEYWORDS)
-    if not has_painter:
+    if not any(kw in content for kw in _PAINTING_KEYWORDS):
         return False, "no painting keyword"
-
-    has_ccq_signal = any(kw in content for kw in _CCQ_KEYWORDS)
-    if not has_ccq_signal:
+    if not any(kw in content for kw in _CCQ_KEYWORDS):
         return False, "no CCQ/construction signal"
-
     return True, "passed"
 
 
-# ============================================================
-# PAGE FETCH
-# ============================================================
-
 def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
-    """Fetch a page, return (plaintext, html)."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -181,25 +140,29 @@ def _fetch_page_text(client: httpx.Client, url: str) -> tuple[str, str]:
         return "", ""
 
 
-# ============================================================
-# PUBLIC API
-# ============================================================
-
-def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
+def find_ccq_job_pages(
+    max_results_per_query: int = 10,
+    skip_urls: Optional[set[str]] = None,
+) -> list[PageContent]:
     """
-    Run surgical CCQ queries, fetch pages, prescreen, return only pages
-    worth sending to Claude.
+    Run CCQ queries and return pages worth passing to Claude.
+
+    Args:
+        max_results_per_query: how many Serper results per query
+        skip_urls: URLs already processed in previous runs -> skip entirely
     """
     if not settings.serper_api_key:
-        logger.warning("SERPER_API_KEY not set, skipping web search volet.")
+        logger.warning("SERPER_API_KEY not set, skipping Volet 2.")
         return []
 
+    skip_urls = skip_urls or set()
     seen_urls: set[str] = set()
     pages: list[PageContent] = []
 
     with httpx.Client() as client:
-        # Step 1: Collect URLs from all queries
-        all_candidates: list[tuple[str, str, str]] = []  # (url, title, query)
+        # Step 1: collect candidate URLs from all Serper queries
+        all_candidates: list[tuple[str, str, str]] = []
+        cache_hit_count = 0
 
         for query in CCQ_QUERIES:
             full_query = _build_query(query)
@@ -208,7 +171,7 @@ def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
             try:
                 results = _serper_search(client, full_query, num=max_results_per_query)
             except Exception as e:
-                logger.error(f"Serper query failed for '{query}': {e}")
+                logger.error(f"Serper query failed: {e}")
                 continue
 
             logger.info(f"  Got {len(results)} results.")
@@ -217,15 +180,20 @@ def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
                 title = r.get("title", "")
                 if not url or url in seen_urls:
                     continue
+                if url in skip_urls:
+                    cache_hit_count += 1
+                    continue
                 if _looks_like_listing_url(url):
-                    logger.info(f"  URL-skip (listing pattern): {url[:80]}")
                     continue
                 seen_urls.add(url)
                 all_candidates.append((url, title, query))
 
-        logger.info(f"Total unique candidate URLs: {len(all_candidates)}")
+        logger.info(
+            f"Candidates: {len(all_candidates)} new URLs, "
+            f"{cache_hit_count} cache hits (already processed)"
+        )
 
-        # Step 2: Fetch + prescreen each page
+        # Step 2: fetch + prescreen
         MAX_PAGES_PER_RUN = 25
         prescreen_pass = 0
         prescreen_fail = 0
@@ -237,8 +205,7 @@ def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
             if not text and not html:
                 continue
 
-            # PRESCREEN before sending to Claude
-            passed, reason = _prescreen_page(text, html, url)
+            passed, reason = _prescreen_page(text, html)
             if not passed:
                 logger.info(f"  Prescreen-skip: {reason}")
                 prescreen_fail += 1
@@ -257,9 +224,9 @@ def find_ccq_job_pages(max_results_per_query: int = 10) -> list[PageContent]:
             ))
 
         logger.info(
-            f"Prescreen results: {prescreen_pass} passed, {prescreen_fail} skipped "
+            f"Prescreen: {prescreen_pass} passed, {prescreen_fail} skipped "
             f"(saved ~{prescreen_fail} Claude calls)"
         )
 
-    logger.info(f"Volet 2 fetched {len(pages)} pages ready for Claude extraction.")
+    logger.info(f"Volet 2 returning {len(pages)} pages for Claude extraction.")
     return pages

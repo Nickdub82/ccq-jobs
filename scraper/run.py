@@ -1,15 +1,17 @@
 """
-Scraper pipeline orchestration — Gmail + Web Search + Claude edition (v3).
+Scraper pipeline orchestration — Gmail + Web Search + Claude (v4).
 
-v3 changes:
-- Added Volet 2: web search via Serper for off-board CCQ jobs
-  (employer career pages, smaller sites not covered by Gmail)
-- Both volets feed into the same Claude extractor + DB pipeline
-- Dedup via fingerprint means duplicates across volets are handled automatically
+v4 adds SOURCE CACHING:
+- Each email (by Gmail message_id) is processed ONCE, ever
+- Each web page (by URL) is processed ONCE, ever
+- Subsequent runs skip them -> no Claude tokens wasted
+- Saves ~$15-30/month and makes runs way faster after the first one
 """
 import logging
 import sys
 from datetime import datetime, timezone
+
+from sqlalchemy import text as sql_text
 
 from config import settings
 from db import get_session
@@ -28,6 +30,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scraper.run")
 
+
+# ============================================================
+# PROCESSED SOURCES CACHE
+# ============================================================
+
+def is_source_processed(db, source_key: str) -> bool:
+    """Has this email/URL been processed before?"""
+    result = db.execute(
+        sql_text("SELECT 1 FROM processed_sources WHERE source_key = :key LIMIT 1"),
+        {"key": source_key},
+    ).first()
+    return result is not None
+
+
+def mark_source_processed(db, source_key: str, source_type: str, jobs_count: int, notes: str = ""):
+    """Record that we've processed this source so future runs skip it."""
+    # Truncate source_key if too long (keys are 500-char VARCHAR)
+    key = source_key[:500] if source_key else ""
+    db.execute(
+        sql_text("""
+            INSERT INTO processed_sources (source_key, source_type, jobs_extracted, notes)
+            VALUES (:key, :type, :jobs, :notes)
+            ON CONFLICT (source_key) DO UPDATE
+            SET processed_at = NOW(), jobs_extracted = EXCLUDED.jobs_extracted
+        """),
+        {"key": key, "type": source_type, "jobs": jobs_count, "notes": notes[:500]},
+    )
+    db.commit()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def get_or_create_source(db, source_name: str) -> Source:
     src = db.query(Source).filter_by(name=source_name).first()
@@ -74,7 +109,6 @@ def save_extracted_jobs(db, extracted_jobs: list[dict], default_source_name: str
     inserted_review = 0
     skipped_non_ccq = 0
     updated = 0
-    ccq_count = 0
 
     for job in extracted_jobs:
         title = job.get("title")
@@ -83,7 +117,6 @@ def save_extracted_jobs(db, extracted_jobs: list[dict], default_source_name: str
         original_url = job.get("original_url")
 
         if not title or not original_url:
-            logger.warning(f"Skipping job with missing title/url: {title}")
             continue
 
         is_likely_ccq = bool(job.get("is_likely_ccq", False))
@@ -95,7 +128,7 @@ def save_extracted_jobs(db, extracted_jobs: list[dict], default_source_name: str
         )
 
         if action == "skip":
-            logger.info(f"Skipping non-CCQ job: {title} (conf: {ccq_confidence})")
+            logger.info(f"Skipping non-CCQ: {title} (conf: {ccq_confidence})")
             skipped_non_ccq += 1
             continue
 
@@ -141,11 +174,7 @@ def save_extracted_jobs(db, extracted_jobs: list[dict], default_source_name: str
         db.commit()
         db.refresh(new_job)
 
-        js = JobSource(
-            job_id=new_job.id,
-            source_id=src.id,
-            source_url=original_url,
-        )
+        js = JobSource(job_id=new_job.id, source_id=src.id, source_url=original_url)
         db.add(js)
         db.commit()
 
@@ -154,20 +183,19 @@ def save_extracted_jobs(db, extracted_jobs: list[dict], default_source_name: str
         else:
             inserted_review += 1
 
-        if is_likely_ccq:
-            ccq_count += 1
-
     return {
         "inserted_approved": inserted_approved,
         "inserted_review": inserted_review,
         "skipped_non_ccq": skipped_non_ccq,
         "updated": updated,
-        "ccq_count": ccq_count,
     }
 
 
+# ============================================================
+# VOLET 1 — GMAIL
+# ============================================================
+
 def process_volet_1_gmail(run_id: int) -> dict:
-    """Volet 1: Gmail inbox alerts (Indeed, Glassdoor, etc.)."""
     logger.info("-" * 60)
     logger.info("VOLET 1: Gmail inbox emails")
     logger.info("-" * 60)
@@ -182,22 +210,55 @@ def process_volet_1_gmail(run_id: int) -> dict:
         logger.info("No inbox emails found.")
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
 
+    # Filter out emails already processed in a previous run
+    db = get_session()
+    try:
+        new_emails = [e for e in emails if not is_source_processed(db, e.message_id)]
+    finally:
+        db.close()
+
+    skipped_cached = len(emails) - len(new_emails)
+    logger.info(
+        f"Found {len(emails)} emails, {len(new_emails)} new, "
+        f"{skipped_cached} already processed (cache hit)"
+    )
+
+    if not new_emails:
+        return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0, "cache_hits": skipped_cached}
+
     all_extracted = []
     ai_calls = 0
-    for email in emails:
+
+    for email in new_emails:
         try:
             jobs = email_parser.extract_jobs_from_email(email)
             ai_calls += 1
+
+            # Mark this email as processed (so we don't re-process it next run)
+            db = get_session()
+            try:
+                mark_source_processed(
+                    db, email.message_id, "email",
+                    jobs_count=len(jobs),
+                    notes=f"from={email.sender[:80]} subject={email.subject[:80]}"
+                )
+            finally:
+                db.close()
+
             for job in jobs:
                 all_extracted.append(job)
+
         except Exception as e:
-            logger.error(f"Failed to extract from email {email.message_id}: {e}", exc_info=True)
+            logger.error(f"Failed on email {email.message_id}: {e}", exc_info=True)
             continue
 
-    logger.info(f"Volet 1 extracted {len(all_extracted)} jobs from {len(emails)} emails.")
+    logger.info(f"Volet 1 extracted {len(all_extracted)} jobs from {len(new_emails)} new emails.")
 
     if not all_extracted:
-        return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": ai_calls}
+        return {
+            "jobs_scraped": 0, "jobs_new": 0, "ai_calls": ai_calls,
+            "cache_hits": skipped_cached,
+        }
 
     db = get_session()
     try:
@@ -208,7 +269,7 @@ def process_volet_1_gmail(run_id: int) -> dict:
     logger.info(
         f"Volet 1 DB writes: {stats['inserted_approved']} approved, "
         f"{stats['inserted_review']} review, {stats['skipped_non_ccq']} skipped, "
-        f"{stats['updated']} already in DB"
+        f"{stats['updated']} already in DB (job-level dedup)"
     )
 
     return {
@@ -217,41 +278,77 @@ def process_volet_1_gmail(run_id: int) -> dict:
         "jobs_updated": stats["updated"],
         "jobs_flagged": stats["inserted_review"],
         "ai_calls": ai_calls,
-        "skipped_non_ccq": stats["skipped_non_ccq"],
+        "cache_hits": skipped_cached,
     }
 
 
+# ============================================================
+# VOLET 2 — WEB SEARCH
+# ============================================================
+
 def process_volet_2_websearch(run_id: int) -> dict:
-    """Volet 2: Serper web search for off-board CCQ jobs."""
     logger.info("-" * 60)
     logger.info("VOLET 2: Web search (Serper)")
     logger.info("-" * 60)
 
+    # Get already-processed URLs so web_search can skip them before fetching
+    db = get_session()
     try:
+        seen_urls_rows = db.execute(
+            sql_text("SELECT source_key FROM processed_sources WHERE source_type = 'webpage'")
+        ).all()
+        seen_urls = {row[0] for row in seen_urls_rows}
+    finally:
+        db.close()
+
+    logger.info(f"{len(seen_urls)} URLs already processed in previous runs (cache)")
+
+    try:
+        pages = web_search.find_ccq_job_pages(
+            max_results_per_query=10,
+            skip_urls=seen_urls,
+        )
+    except TypeError:
+        # Backward compat if web_search hasn't been updated to accept skip_urls
         pages = web_search.find_ccq_job_pages(max_results_per_query=10)
+        pages = [p for p in pages if p.message_id not in seen_urls]
     except Exception as e:
         logger.error(f"Web search failed: {e}", exc_info=True)
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
 
     if not pages:
-        logger.info("No pages found from web search.")
+        logger.info("No new pages to process.")
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": 0}
 
     all_extracted = []
     ai_calls = 0
+
     for page in pages:
         try:
             jobs = email_parser.extract_jobs_from_email(page)
             ai_calls += 1
+
+            # Mark this page URL as processed
+            db = get_session()
+            try:
+                mark_source_processed(
+                    db, page.message_id, "webpage",
+                    jobs_count=len(jobs),
+                    notes=f"subject={page.subject[:80]}"
+                )
+            finally:
+                db.close()
+
             for job in jobs:
                 if not job.get("original_url"):
                     job["original_url"] = page.message_id
                 all_extracted.append(job)
+
         except Exception as e:
-            logger.error(f"Failed to extract from page {page.message_id}: {e}", exc_info=True)
+            logger.error(f"Failed on page {page.message_id[:80]}: {e}", exc_info=True)
             continue
 
-    logger.info(f"Volet 2 extracted {len(all_extracted)} jobs from {len(pages)} pages.")
+    logger.info(f"Volet 2 extracted {len(all_extracted)} jobs from {len(pages)} new pages.")
 
     if not all_extracted:
         return {"jobs_scraped": 0, "jobs_new": 0, "ai_calls": ai_calls}
@@ -265,7 +362,7 @@ def process_volet_2_websearch(run_id: int) -> dict:
     logger.info(
         f"Volet 2 DB writes: {stats['inserted_approved']} approved, "
         f"{stats['inserted_review']} review, {stats['skipped_non_ccq']} skipped, "
-        f"{stats['updated']} already in DB"
+        f"{stats['updated']} already in DB (job-level dedup)"
     )
 
     return {
@@ -274,18 +371,21 @@ def process_volet_2_websearch(run_id: int) -> dict:
         "jobs_updated": stats["updated"],
         "jobs_flagged": stats["inserted_review"],
         "ai_calls": ai_calls,
-        "skipped_non_ccq": stats["skipped_non_ccq"],
     }
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
     logger.info("=" * 60)
-    logger.info("Scraper starting up (Gmail + Web Search + Claude v3)")
+    logger.info("Scraper starting up (v4 with source cache)")
     logger.info("=" * 60)
 
     try:
         db = get_session()
-        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db.execute(sql_text("SELECT 1"))
         db.close()
         logger.info("DB connection OK")
     except Exception as e:
