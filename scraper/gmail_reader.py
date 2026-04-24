@@ -1,10 +1,9 @@
 """
-Gmail reader for Indeed job alert emails.
+Gmail reader for job alert emails.
 
-Connects to Gmail via OAuth 2.0, fetches Indeed alert emails,
-and returns their content (plaintext + HTML) for Claude to parse.
-
-No brittle HTML parsing here -- Claude does the extraction.
+v3: Reads ALL emails from the inbox (not just Indeed).
+    Any job board alert that lands in ccq.jobs.montreal@gmail.com gets parsed.
+    Claude decides what's CCQ-relevant and what's junk.
 """
 import os
 import json
@@ -26,7 +25,6 @@ TOKEN_PATH = Path(__file__).parent / "token.json"
 
 @dataclass
 class RawEmail:
-    """A single email ready to be handed to Claude for parsing."""
     message_id: str
     sender: str
     subject: str
@@ -88,10 +86,14 @@ def get_gmail_service():
 # FETCH
 # ============================================================
 
-def _list_indeed_emails(service, hours_back: int = 48) -> list[str]:
-    """Return message IDs of Indeed emails from the last N hours."""
+def _list_inbox_emails(service, hours_back: int = 48) -> list[str]:
+    """Return message IDs of ALL inbox emails from the last N hours.
+
+    The inbox is dedicated to job alerts (Indeed, Glassdoor, Jobillico, Jobboom, etc.),
+    so we scrape everything. Claude filters out non-job content at extraction time.
+    """
     days_back = max(1, hours_back // 24 + 1)
-    query = f"(from:indeed.com OR from:indeed.ca) newer_than:{days_back}d"
+    query = f"in:inbox newer_than:{days_back}d"
 
     logger.info(f"Searching Gmail: {query}")
     all_ids = []
@@ -112,7 +114,7 @@ def _list_indeed_emails(service, hours_back: int = 48) -> list[str]:
         if not page_token:
             break
 
-    logger.info(f"Found {len(all_ids)} Indeed emails in last {hours_back}h window.")
+    logger.info(f"Found {len(all_ids)} emails in last {hours_back}h window.")
     return all_ids
 
 
@@ -185,12 +187,20 @@ def _fetch_email(service, message_id: str) -> Optional[RawEmail]:
 # ============================================================
 
 def fetch_indeed_emails(hours_back: int = 48) -> list[RawEmail]:
-    """Fetch all Indeed alert emails in the window."""
+    """
+    Legacy name kept for backward compat with run.py.
+    Actually fetches ALL inbox emails now -- Claude filters relevance.
+    """
+    return fetch_all_inbox_emails(hours_back=hours_back)
+
+
+def fetch_all_inbox_emails(hours_back: int = 48) -> list[RawEmail]:
+    """Fetch all emails from the inbox in the time window."""
     service = get_gmail_service()
-    message_ids = _list_indeed_emails(service, hours_back=hours_back)
+    message_ids = _list_inbox_emails(service, hours_back=hours_back)
 
     if not message_ids:
-        logger.warning("No Indeed emails found in the window.")
+        logger.warning("No emails found in the window.")
         return []
 
     emails = []
@@ -201,7 +211,7 @@ def fetch_indeed_emails(hours_back: int = 48) -> list[RawEmail]:
                 emails.append(email)
                 logger.info(
                     f"Fetched email {msg_id}: '{email.subject[:60]}' "
-                    f"(text: {len(email.body_text)} chars, html: {len(email.body_html)} chars)"
+                    f"(from: {email.sender[:40]}, text: {len(email.body_text)} chars)"
                 )
         except Exception as e:
             logger.error(f"Failed to fetch email {msg_id}: {e}")
