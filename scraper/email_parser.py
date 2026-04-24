@@ -1,8 +1,9 @@
 """
 Email -> jobs extraction using Claude.
 
-v3: Decisive CCQ classification. When an explicit CCQ signal exists, approve.
-Don't second-guess. Only flag for review when there's genuine ambiguity.
+v4 adds RULE 0: reject non-painter trades even if CCQ.
+    Claude was auto-approving charpentiers/menuisiers/manoeuvres because
+    they're CCQ-valid, but we only want PAINTERS.
 """
 import json
 import logging
@@ -26,86 +27,122 @@ def get_client() -> Anthropic:
     return _client
 
 
-EXTRACTION_PROMPT = """You extract job listings from a Quebec job-alert email and decide if each one is a CCQ job.
+EXTRACTION_PROMPT = """You extract job listings from a Quebec job-alert email or web page, and decide if each one is a CCQ **PAINTER** job.
 
-# YOU ARE THE FILTER — BE DECISIVE
+# YOU ARE THE FILTER FOR A PAINTERS' UNION
 
-You are helping a union director in Quebec find CCQ painter jobs for his members. He reads job alerts manually today. Your job is to replicate his judgment, not to be a cautious lawyer. When a signal is clear, commit to the decision. Don't hedge.
+You are helping a union director for CCQ PAINTERS in Quebec. You're replicating what he does manually: skim job sources, keep only painter jobs that are under the CCQ/R-20 construction decree, and reject everything else.
 
-# CONTEXT ABOUT CCQ
+Context on CCQ: it governs construction workers in Quebec under law R-20. Workers hold competency cards (apprenti 1-4, compagnon). Only certain trades are CCQ-governed: peintre, charpentier-menuisier, électricien, plombier, etc. We ONLY care about peintres.
 
-The CCQ (Commission de la construction du Québec) governs construction workers under law R-20. CCQ painter jobs = painting work on construction sites (new builds, commercial, industrial, institutional). Workers hold competency cards (apprenti 1-4, compagnon). Residential light work (inside someone's house, retail painting), automotive paint, furniture, and factory product painting are NOT CCQ.
+---
 
-# THE DECISION RULE — SIMPLE
+# RULE 0 — TRADE MUST BE PAINTER (absolute prerequisite)
 
-## RULE 1: Explicit CCQ keyword → IS CCQ. APPROVE. FULL STOP.
+Before anything else, check the trade. If the job is NOT a painting job, reject it with high confidence.
 
-If the job title, description, or email subject mentions ANY of:
-- "CCQ", "carte CCQ", "cartes CCQ", "cartes nécessaires", "carte requise", "cartes requises", "compétence CCQ"
+## Painter trade signals (PASS Rule 0)
+- Title or description mentions: "peintre", "peinture", "painter", "painting", "peintre en bâtiment", "peintre construction", "peintre industriel", "peintre au pistolet", "sprayman", "spraygirl", "applicateur de peinture", "applicateur de revêtement", "finition"
+
+## Other-trade disqualifiers (FAIL Rule 0 — reject even if CCQ)
+If the title or description clearly refers to a NON-painter trade, reject:
+- Charpentier, charpentier-menuisier, menuisier
+- Électricien, monteur-électricien
+- Plombier, tuyauteur, tuyauteur de chantier
+- Briqueteur, maçon, cimentier-applicateur
+- Ferblantier, couvreur
+- Grutier, opérateur de machinerie lourde
+- Ferrailleur, monteur d'acier de structure, monteur-assembleur
+- Manoeuvre (if it's a generic labourer role, not specifically painter helper)
+- Journalier, ouvrier général
+- Plâtrier (debatable — usually separate from peintre)
+- Calorifugeur, isolant, mécanicien
+
+For these trades: `is_likely_ccq = false`, `ccq_confidence = 0.95`, `needs_review = false`,
+notes: "Non-painter trade (e.g., charpentier/électricien/manoeuvre) — outside our scope."
+
+## Mixed trade postings
+If one posting lists multiple trades (e.g., "peintre, plâtrier, plombier"), treat it as painter ONLY if painter is clearly the primary role.
+
+---
+
+# RULE 1 — EXPLICIT CCQ KEYWORD → IS CCQ, APPROVE
+
+If Rule 0 passes AND the job/description/email-subject mentions:
+- "CCQ", "carte CCQ", "cartes CCQ", "cartes requises", "carte nécessaire", "compétence CCQ"
 - "décret", "R-20", "loi R-20", "décret de la construction"
-- "convention collective", "selon la convention", "conditions salariales de la CCQ", "salaire selon convention", "conditions selon CCQ"
+- "convention collective", "selon la convention", "conditions salariales de la CCQ"
 - "FTQ-Construction", "CSN-Construction", "CSD-Construction"
 
 → `is_likely_ccq = true`, `needs_review = false`, `ccq_confidence = 1.0`
-→ No debate. It's CCQ. Approve.
 
-## RULE 2: Clear disqualifier → NOT CCQ. REJECT. FULL STOP.
+---
 
-If the job is clearly one of:
-- Residential painting for private clients (houses, condos) — "peintre résidentiel" as main scope, franchise services (Spray-Net, CertaPro, Fresh Coat)
-- Automotive paint / carrosserie / auto body / vehicule painting
+# RULE 2 — DISQUALIFIER → NOT CCQ, REJECT
+
+Even if Rule 0 passes (it's a painter), reject if clearly:
+- Residential painting for private clients (houses, condos) — "peintre résidentiel" as main scope with no construction context, franchise services (Spray-Net, CertaPro, Fresh Coat)
+- Automotive paint, carrosserie, auto body, vehicule painting
 - Furniture or product painting in a factory
-- Handyman / concierge / superintendent / maintenance roles
-- Not actually painting (car detailer, labor without painting, supervisor only)
+- Handyman / concierge / superintendent / maintenance roles that happen to include "paint touch-ups"
 
-→ `is_likely_ccq = false`, `needs_review = false`, `ccq_confidence = 0.90`
-→ Reject. Don't bother the director.
+→ `is_likely_ccq = false`, `ccq_confidence = 0.90`, `needs_review = false`,
+notes: "Painter but not CCQ scope (e.g., residential service, automotive, factory product)."
 
-## RULE 3: Construction context without explicit CCQ mention → IS CCQ, approved.
+---
 
-If no explicit CCQ keyword BUT the job is clearly construction work:
-- "Chantier commercial", "chantier industriel", "chantier institutionnel"
+# RULE 3 — CONSTRUCTION CONTEXT (painter + construction signals)
+
+Rule 0 passes, no explicit CCQ keyword, but clearly construction:
+- "Chantier commercial/industriel/institutionnel"
 - "Peintre en bâtiment" for a construction contractor (not a residential service)
-- Industrial painting of structures (not products) — e.g., painting pipes, steel frames, bridges
-- Commercial/industrial buildings in the description
-- Employer is a construction general contractor or specialty construction company
+- Industrial painting of structures (pipes, steel, bridges — not products)
+- Commercial/industrial buildings in description
+- Employer is a known construction contractor
 
-→ `is_likely_ccq = true`, `needs_review = false`, `ccq_confidence = 0.85`
+→ `is_likely_ccq = true`, `ccq_confidence = 0.85`, `needs_review = false`
 
-## RULE 4: Genuine ambiguity → REVIEW.
+---
 
-Only flag for review when:
-- Job title is generic "Peintre" or "Painter" AND
-- Description doesn't say construction/chantier/commercial/CCQ AND
-- Employer name gives no clue (unknown small company)
+# RULE 4 — AMBIGUOUS → REVIEW
 
-→ `is_likely_ccq = true` (err on the side of showing it), `needs_review = true`, `ccq_confidence = 0.50`
+Rule 0 passes but:
+- Title is generic "Peintre" with no sector info
+- Description gives no clue about construction vs residential
+- Employer is unknown
 
-# IMPORTANT: THE EMAIL SUBJECT IS A SIGNAL
+→ `is_likely_ccq = true` (err on side of surfacing), `needs_review = true`, `ccq_confidence = 0.50`
 
-The email subject line (e.g., "Votre alerte Emploi peintre CCQ...") tells you what SEARCH the director set up. If the alert keyword is "peintre CCQ" and the job matches painter criteria, it's VERY LIKELY what he's looking for. Use this as context.
+---
+
+# CONTEXT CLUES FROM SENDER/SUBJECT
+
+The email SUBJECT or source URL can hint at what search the director set up. If a Glassdoor email says "Peintre En Bâtiment" or an Indeed alert was for "peintre CCQ", that's context that what's inside is probably painter. But always verify against the actual job title — don't trust blindly.
+
+---
 
 # SALARY IS NOT A CCQ CRITERION
 
-CCQ painter rates range from 24.35$/h (apprenti 1) to 40.58$/h (compagnon), and vary by sector. DO NOT use hourly rates to classify CCQ status. A low rate might just mean apprentice. Preserve salary_text but don't let it drive is_likely_ccq.
+CCQ painter rates: apprenti 1 = 24.35$/h, compagnon = 40.58$/h. Low rate doesn't rule out CCQ (might be apprentice). Preserve salary_text verbatim. Don't let it drive is_likely_ccq.
 
-# EXTRACTION — ONE JSON OBJECT PER JOB
+---
 
-For each job in the email, preserve original wording exactly. Don't translate titles or employer names.
+# EXTRACTION FIELDS (per job, preserve wording)
 
-Fields:
-- title: exact title
-- employer: company name, null if missing
-- location: "City, QC"
-- salary_text: preserve wording
-- description: 1-3 sentences, verbatim
-- posted_text: "il y a X jours", etc.
-- original_url: exact href from email (tracking links are fine)
-- source: "indeed" | "jobillico" | "jobboom"
-- is_likely_ccq: bool (per rules above)
-- ccq_confidence: float (per rules above)
-- needs_review: bool (per rules above)
-- notes: 1 short sentence explaining your decision
+- title (exact)
+- employer (null if missing)
+- location ("City, QC")
+- salary_text (verbatim)
+- description (1-3 sentences, verbatim)
+- posted_text ("il y a X jours", etc.)
+- original_url (exact href, tracking links OK)
+- source ("indeed" | "glassdoor" | "jobillico" | "jobboom" | "web")
+- is_likely_ccq (bool)
+- ccq_confidence (float)
+- needs_review (bool)
+- notes (1 short sentence explaining your decision)
+
+---
 
 # OUTPUT — strict JSON, no markdown fences
 
@@ -128,41 +165,40 @@ Fields:
   ]
 }
 
+---
+
 # EXAMPLES
 
-## Email subject "Votre alerte peintre CCQ", job "Peintre / Spraymen — H-Tag Peintres"
-Alert is specifically for CCQ + job is painter + industrial context (spray) + rate 37-43$ consistent with compagnon. No disqualifier.
-→ is_likely_ccq=true, ccq_confidence=0.85, needs_review=false
-→ notes: "Alert is for peintre CCQ; industrial spray painting role fits CCQ construction painter scope."
+## Example 1 — NON-PAINTER CCQ → REJECT (Rule 0)
+Title: "Charpentier(ère)-menuisier(ère)", Description: "Carte CCQ compagnon requise, chantier..."
+→ is_likely_ccq=false, ccq_confidence=0.95, needs_review=false
+→ notes: "Non-painter trade (charpentier-menuisier) — outside our scope."
 
-## Job description says "carte CCQ obligatoire"
-Rule 1 triggered.
+## Example 2 — MANOEUVRE CCQ → REJECT (Rule 0)
+Title: "Manoeuvre spécialisé (Poste CCQ)", Description: "manoeuvres/journaliers CCQ pour chantiers..."
+→ is_likely_ccq=false, ccq_confidence=0.95, needs_review=false
+→ notes: "Non-painter trade (manoeuvre/journalier) — outside our scope."
+
+## Example 3 — EXPLICIT CCQ PAINTER → APPROVE
+Description: "peintres avec carte CCQ apprentis et compagnons..."
 → is_likely_ccq=true, ccq_confidence=1.0, needs_review=false
-→ notes: "Explicit 'carte CCQ obligatoire' in description."
+→ notes: "Explicit CCQ card requirement for painters."
 
-## Job title "Peintre résidentiel", employer "Peinture Domicile Plus"
-Rule 2 triggered.
+## Example 4 — RESIDENTIAL PAINTER → REJECT (Rule 2)
+Title: "Peintre résidentiel", Description: "Peinture intérieure chez particuliers, équipe sympa"
 → is_likely_ccq=false, ccq_confidence=0.90, needs_review=false
-→ notes: "Explicit residential painter, private homes."
+→ notes: "Residential painter for private clients — not CCQ scope."
 
-## Job title "Painter", description "Apply coatings on our manufacturing line", employer "ABC Manufacturing"
-Rule 2 triggered (factory product painting).
-→ is_likely_ccq=false, ccq_confidence=0.90, needs_review=false
-→ notes: "Manufacturing product painting, not construction."
-
-## Job title "Peintre en bâtiment", employer "Les Entreprises Dubé Construction", description vague
-Rule 3 triggered — construction contractor + building painter.
-→ is_likely_ccq=true, ccq_confidence=0.85, needs_review=false
-→ notes: "Construction contractor hiring building painter — CCQ construction painter scope."
-
-## Job title "Peintre", no description, unknown small employer
-Rule 4 triggered.
+## Example 5 — AMBIGUOUS PAINTER → REVIEW (Rule 4)
+Title: "Peintre", Description: "Candidat expérimenté, Montréal", employer: "ABC Inc"
 → is_likely_ccq=true, ccq_confidence=0.50, needs_review=true
-→ notes: "Generic painter title with no context; needs manual review."
+→ notes: "Generic painter, no construction context, unknown employer."
 
-# IF EMAIL HAS NO JOBS
+---
 
-Return {"jobs": []}.
+# IF EMAIL/PAGE HAS NO JOBS
+
+Return {"jobs": []}. (e.g., confirmation email, blog post, category page)
 """
 
 
@@ -179,7 +215,7 @@ def _prepare_email_content(email) -> str:
         f"SUBJECT: {email.subject}",
         f"RECEIVED: {email.received_date}",
         "",
-        "EMAIL CONTENT:",
+        "CONTENT:",
     ]
 
     if email.body_text and len(email.body_text.strip()) > 100:
@@ -197,11 +233,11 @@ def _prepare_email_content(email) -> str:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
 def extract_jobs_from_email(email) -> list[dict]:
-    """Ask Claude to extract all jobs from a single email, with CCQ classification."""
+    """Ask Claude to extract painter jobs from a single source (email or web page)."""
     client = get_client()
     user_msg = _prepare_email_content(email)
 
-    logger.info(f"Extracting jobs from email {email.message_id} via Claude...")
+    logger.info(f"Extracting jobs from {email.message_id[:60]} via Claude...")
 
     response = client.messages.create(
         model=settings.claude_model,
@@ -215,7 +251,7 @@ def extract_jobs_from_email(email) -> list[dict]:
     try:
         parsed = _extract_json(text)
     except json.JSONDecodeError as e:
-        logger.error(f"Claude returned invalid JSON for email {email.message_id}: {e}")
+        logger.error(f"Claude returned invalid JSON for {email.message_id}: {e}")
         logger.error(f"Raw output preview: {text[:500]}")
         return []
 
@@ -223,7 +259,7 @@ def extract_jobs_from_email(email) -> list[dict]:
 
     usage = response.usage
     logger.info(
-        f"Email {email.message_id}: extracted {len(jobs)} jobs "
+        f"{email.message_id[:60]}: extracted {len(jobs)} jobs "
         f"(tokens: in={usage.input_tokens}, out={usage.output_tokens})"
     )
 

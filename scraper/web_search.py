@@ -1,17 +1,10 @@
 """
-Volet 2 — Web search for off-board CCQ job postings.
+Volet 2 — Web search for off-board CCQ painter job postings.
 
-v3 adds `skip_urls` parameter so run.py can pass already-processed URLs
-and we skip them BEFORE even fetching (saves HTTP requests too).
-
-Pipeline:
-    1. Serper queries with CCQ keywords + job board exclusions
-    2. Collect candidate URLs
-    3. Skip URLs already processed in previous runs (cache hit)
-    4. Skip URLs matching listing/search patterns
-    5. Fetch each new page
-    6. Prescreen (painter + CCQ keywords) before sending to Claude
-    7. Return worthy pages for extraction
+v4: Expanded EXCLUDED_SITES to filter out aggregators beyond just Indeed.
+    Added: talent.com, ziprecruiter.com, chantieremploi.com, neuvoo, jooble, etc.
+    These ramened du bruit multi-trades that the prompt now filters anyway,
+    but blocking them at search time saves Claude tokens and cleans results.
 """
 import logging
 import re
@@ -30,21 +23,49 @@ logger = logging.getLogger(__name__)
 SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 REQUEST_TIMEOUT = 30
 
+# Sites to exclude from Serper queries:
+# 1. Big job boards we already cover via Gmail
+# 2. Multi-trade aggregators that return too much noise
+# 3. Social platforms that don't work for scraping
 EXCLUDED_SITES = [
+    # Major job boards covered by Gmail alerts
     "indeed.com", "indeed.ca",
     "jobillico.com", "jobboom.com",
     "glassdoor.com", "glassdoor.ca",
-    "linkedin.com",
+
+    # Multi-trade aggregators (too much non-painter noise)
+    "talent.com", "ca.talent.com",
+    "ziprecruiter.com",
+    "neuvoo.ca", "neuvoo.com",
+    "jooble.org",
+    "chantieremploi.com",
     "monster.com", "monster.ca",
+    "simplyhired.com", "simplyhired.ca",
+    "workopolis.com",
+    "careerbuilder.com",
+
+    # Social / media that don't yield good results
+    "linkedin.com",
+    "instagram.com",
+    "youtube.com",
+    "facebook.com",
+    "twitter.com",
+    "tiktok.com",
+
+    # Ad/marketing sites that clutter results
+    "pinterest.com",
 ]
 
+# Surgical queries aimed at painter employer career pages
 CCQ_QUERIES = [
     '"carte CCQ" peintre Québec',
     '"cartes CCQ" peintre emploi',
-    '"décret construction" peintre emploi Québec',
+    'peintre "décret construction" emploi Québec',
     '"selon la convention CCQ" peintre',
     '"compétence CCQ" peintre emploi',
     '"peintre en bâtiment" "R-20"',
+    '"peintre compagnon" emploi Québec chantier',
+    '"apprenti peintre" CCQ emploi',
 ]
 
 
@@ -144,13 +165,6 @@ def find_ccq_job_pages(
     max_results_per_query: int = 10,
     skip_urls: Optional[set[str]] = None,
 ) -> list[PageContent]:
-    """
-    Run CCQ queries and return pages worth passing to Claude.
-
-    Args:
-        max_results_per_query: how many Serper results per query
-        skip_urls: URLs already processed in previous runs -> skip entirely
-    """
     if not settings.serper_api_key:
         logger.warning("SERPER_API_KEY not set, skipping Volet 2.")
         return []
@@ -160,7 +174,6 @@ def find_ccq_job_pages(
     pages: list[PageContent] = []
 
     with httpx.Client() as client:
-        # Step 1: collect candidate URLs from all Serper queries
         all_candidates: list[tuple[str, str, str]] = []
         cache_hit_count = 0
 
@@ -193,7 +206,6 @@ def find_ccq_job_pages(
             f"{cache_hit_count} cache hits (already processed)"
         )
 
-        # Step 2: fetch + prescreen
         MAX_PAGES_PER_RUN = 25
         prescreen_pass = 0
         prescreen_fail = 0
