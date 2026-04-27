@@ -1,22 +1,16 @@
 """
-Scraper pipeline orchestration — Gmail + Web Search + Claude (v5).
+Scraper pipeline orchestration — Gmail + Web Search + Claude (v6).
 
-v5 decouples the two volets:
-    - Volet 1 (Gmail) runs ONLY when current UTC hour matches GMAIL_HOUR_UTC
-      (default 22h UTC = 18h Québec EDT / 17h Québec EST)
-      -> Indeed/Glassdoor send 1 daily digest -- no point running more often
-    - Volet 2 (Web search) runs EVERY time the scheduler fires
-      -> Employer career pages can change anytime
+v6 changes from v5:
+    - Volet 1 (Gmail) now runs on EVERY scheduler tick.
+      The processed_sources cache prevents re-extracting already-seen emails,
+      so frequent runs cost ~zero Claude tokens when nothing is new.
+    - Removed GMAIL_HOUR_UTC gate (was preventing Volet 1 from ever running
+      with a `0 */4` cron because hour 22 is never in 0,4,8,12,16,20).
 
-Railway cron:  0 2,10,14,18,22 * * *   (every 4-6 hours)
-    - 02 UTC = 22h Québec EDT  -> Web only
-    - 10 UTC = 06h Québec EDT  -> Web only
-    - 14 UTC = 10h Québec EDT  -> Web only
-    - 18 UTC = 14h Québec EDT  -> Web only
-    - 22 UTC = 18h Québec EDT  -> Gmail + Web (pivot)
+Railway cron:  0 */4 * * *   (every 4 hours)
 """
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 
@@ -38,11 +32,6 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger("scraper.run")
-
-
-# Hour of day (UTC) when Volet 1 Gmail runs. Override via env var if needed.
-# 22h UTC = 18h Québec EDT (summer) or 17h Québec EST (winter).
-GMAIL_HOUR_UTC = int(os.environ.get("GMAIL_HOUR_UTC", "22"))
 
 
 # ============================================================
@@ -104,6 +93,12 @@ def get_or_create_employer(db, name: str):
 
 
 def decide_job_status(is_likely_ccq: bool, ccq_confidence: float, claude_needs_review: bool):
+    """
+    Returns (action, is_approved, needs_review).
+    - skip: clearly non-CCQ with high confidence -> not saved
+    - save_review: ambiguous or Claude flagged -> saved but needs_review=true
+    - save_approved: clearly CCQ with high confidence -> visible on portal
+    """
     if not is_likely_ccq and ccq_confidence >= 0.80:
         return ("skip", False, False)
     if claude_needs_review:
@@ -386,11 +381,10 @@ def process_volet_2_websearch(run_id: int) -> dict:
 
 def main():
     now_utc = datetime.now(timezone.utc)
-    current_hour = now_utc.hour
 
     logger.info("=" * 60)
-    logger.info(f"Scraper v5 starting at {now_utc.isoformat()}")
-    logger.info(f"Current UTC hour: {current_hour} (Gmail runs at {GMAIL_HOUR_UTC} UTC)")
+    logger.info(f"Scraper v6 starting at {now_utc.isoformat()}")
+    logger.info("Both volets run every tick. Cache prevents waste.")
     logger.info("=" * 60)
 
     # DB smoke test
@@ -420,21 +414,14 @@ def main():
         "ai_calls": 0,
     }
 
-    # VOLET 1 — Gmail (only at GMAIL_HOUR_UTC)
-    if current_hour == GMAIL_HOUR_UTC:
-        logger.info(f"Hour match ({current_hour} UTC) -> running Volet 1 Gmail")
-        try:
-            v1_stats = process_volet_1_gmail(run_id)
-            for k, v in v1_stats.items():
-                if k in final_stats and isinstance(v, int):
-                    final_stats[k] += v
-        except Exception as e:
-            logger.error(f"Volet 1 failed: {e}", exc_info=True)
-    else:
-        logger.info(
-            f"Skipping Volet 1 (current hour {current_hour} != {GMAIL_HOUR_UTC} UTC). "
-            f"Gmail only checks daily at {GMAIL_HOUR_UTC}:00 UTC."
-        )
+    # VOLET 1 — Gmail (every run, cache prevents waste)
+    try:
+        v1_stats = process_volet_1_gmail(run_id)
+        for k, v in v1_stats.items():
+            if k in final_stats and isinstance(v, int):
+                final_stats[k] += v
+    except Exception as e:
+        logger.error(f"Volet 1 failed: {e}", exc_info=True)
 
     # VOLET 2 — Web search (every run)
     try:
