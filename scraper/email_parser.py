@@ -1,9 +1,13 @@
 """
 Email -> jobs extraction using Claude.
 
-v4 adds RULE 0: reject non-painter trades even if CCQ.
-    Claude was auto-approving charpentiers/menuisiers/manoeuvres because
-    they're CCQ-valid, but we only want PAINTERS.
+v5 changes from v4:
+    - Robust JSON extraction: handles markdown fences, preambles, suffixes
+    - max_tokens raised 8000 -> 16000 (Lofty/devinci emails were truncating)
+    - Fallback: when JSON parsing fails completely, returns a placeholder
+      job in review queue with the raw Claude output preview, so nothing
+      is lost silently. The director can manually fix it from admin.
+    - Stronger system instruction: "JSON ONLY, no preamble, no markdown"
 """
 import json
 import logging
@@ -28,6 +32,12 @@ def get_client() -> Anthropic:
 
 
 EXTRACTION_PROMPT = """You extract job listings from a Quebec job-alert email or web page, and decide if each one is a CCQ **PAINTER** job.
+
+# CRITICAL OUTPUT RULE — READ FIRST
+
+Your entire response MUST be a single valid JSON object. No preamble. No explanation. No markdown fences (no ```json). Start your response with `{` and end with `}`. Nothing else.
+
+If you have analysis to share, put it in the `notes` field of each job. Do NOT write commentary outside the JSON.
 
 # YOU ARE THE FILTER FOR A PAINTERS' UNION
 
@@ -133,7 +143,7 @@ CCQ painter rates: apprenti 1 = 24.35$/h, compagnon = 40.58$/h. Low rate doesn't
 - employer (null if missing)
 - location ("City, QC")
 - salary_text (verbatim)
-- description (1-3 sentences, verbatim)
+- description (1-3 sentences, verbatim — keep SHORT to save tokens)
 - posted_text ("il y a X jours", etc.)
 - original_url (exact href, tracking links OK)
 - source ("indeed" | "glassdoor" | "jobillico" | "jobboom" | "web")
@@ -142,9 +152,11 @@ CCQ painter rates: apprenti 1 = 24.35$/h, compagnon = 40.58$/h. Low rate doesn't
 - needs_review (bool)
 - notes (1 short sentence explaining your decision)
 
+KEEP descriptions short (1-2 sentences max). Don't waste tokens on verbose copy.
+
 ---
 
-# OUTPUT — strict JSON, no markdown fences
+# OUTPUT — JSON only, starts with `{`, ends with `}`, no fences, no preamble
 
 {
   "jobs": [
@@ -203,10 +215,100 @@ Return {"jobs": []}. (e.g., confirmation email, blog post, category page)
 
 
 def _extract_json(text: str) -> dict:
+    """
+    Robust JSON extraction. Handles:
+    - Pure JSON: {"jobs": [...]}
+    - Markdown fences: ```json\n{...}\n```
+    - Preamble + JSON: "Here's the analysis...\n{...}"
+    - Suffix after JSON: "{...}\n\nLet me know if..."
+    - Mixed: "```json\n{...}\n```\n\nNotes: ..."
+
+    Strategy: find the outermost {...} block by bracket counting.
+    """
     text = text.strip()
+
+    # Strip markdown fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
-    return json.loads(text)
+    text = text.strip()
+
+    # Fast path: try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find first `{` and match to its closing `}` via bracket counting
+    # (handles strings, escapes, nested objects)
+    start = text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("No `{` found in response", text, 0)
+
+    depth = 0
+    in_string = False
+    escape = False
+    end = -1
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    if end == -1:
+        # Truncated JSON — try to salvage by closing brackets
+        raise json.JSONDecodeError(
+            "Unterminated JSON object (possibly truncated by max_tokens)",
+            text, start
+        )
+
+    return json.loads(text[start:end])
+
+
+def _make_review_placeholder(email, raw_preview: str, error_msg: str) -> dict:
+    """
+    When JSON extraction fully fails, create a placeholder job that gets
+    routed to the review queue. Director can manually inspect & fix from
+    the admin console rather than losing the email silently.
+    """
+    return {
+        "title": "⚠️ Extraction manuelle requise",
+        "employer": email.sender[:80] if hasattr(email, "sender") else "Inconnu",
+        "location": None,
+        "salary_text": None,
+        "description": (
+            f"L'extraction automatique a échoué pour cette source. "
+            f"Erreur: {error_msg}. "
+            f"Aperçu de la réponse Claude: {raw_preview[:400]}"
+        ),
+        "posted_text": None,
+        "original_url": email.message_id if hasattr(email, "message_id") else "unknown",
+        "source": "web",
+        "is_likely_ccq": True,
+        "ccq_confidence": 0.50,
+        "needs_review": True,
+        "notes": f"Parser fail — needs manual extraction. Subject: {email.subject[:120] if hasattr(email, 'subject') else ''}",
+    }
 
 
 def _prepare_email_content(email) -> str:
@@ -241,26 +343,30 @@ def extract_jobs_from_email(email) -> list[dict]:
 
     response = client.messages.create(
         model=settings.claude_model,
-        max_tokens=8000,
+        max_tokens=16000,  # raised from 8000 — devinci/Lofty emails truncate at 8k
         system=EXTRACTION_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
 
     text = "".join(block.text for block in response.content if hasattr(block, "text"))
+    usage = response.usage
 
     try:
         parsed = _extract_json(text)
+        jobs = parsed.get("jobs", [])
+        logger.info(
+            f"{email.message_id[:60]}: extracted {len(jobs)} jobs "
+            f"(tokens: in={usage.input_tokens}, out={usage.output_tokens})"
+        )
+        return jobs
+
     except json.JSONDecodeError as e:
+        # JSON extraction failed even after robust parsing.
+        # Don't lose the email silently — surface it as a review-queue placeholder.
         logger.error(f"Claude returned invalid JSON for {email.message_id}: {e}")
         logger.error(f"Raw output preview: {text[:500]}")
-        return []
-
-    jobs = parsed.get("jobs", [])
-
-    usage = response.usage
-    logger.info(
-        f"{email.message_id[:60]}: extracted {len(jobs)} jobs "
-        f"(tokens: in={usage.input_tokens}, out={usage.output_tokens})"
-    )
-
-    return jobs
+        logger.warning(
+            f"Creating review-queue placeholder for {email.message_id[:60]} "
+            f"(tokens: in={usage.input_tokens}, out={usage.output_tokens})"
+        )
+        return [_make_review_placeholder(email, text, str(e))]
